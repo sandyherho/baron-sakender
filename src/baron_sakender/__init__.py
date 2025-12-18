@@ -26,12 +26,12 @@ Named after Baron Sakéndér, the legendary Bugis-Makassar hero
 from South Sulawesi, Indonesia, known in traditional literature
 for his extraordinary strength and wisdom.
 
-Authors: Sandy H. S. Herho, Faiz R. Fajary, Dasapta E. Irawan
+Authors: Sandy H. S. Herho, Faiz R. Fajary, Nurjanna J. Trilaksono, Dasapta E. Irawan
 License: MIT
 """
 
 __version__ = "0.0.1"
-__author__ = "Sandy H. S. Herho, Faiz R. Fajary, Dasapta E. Irawan"
+__author__ = "Sandy H. S. Herho, Faiz R. Fajary, Nurjanna J. Trilaksono, Dasapta E. Irawan"
 __email__ = "sandy.herho@email.ucr.edu"
 __license__ = "MIT"
 

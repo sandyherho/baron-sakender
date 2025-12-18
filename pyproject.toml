@@ -4,8 +4,9 @@ version = "0.0.1"
 description = "JAX-Accelerated 2D Ideal MHD Solver with Comprehensive Turbulence and Conservation Metrics"
 authors = [
     "Sandy H. S. Herho <sandy.herho@email.ucr.edu>",
-    "Faiz R. Fajary <faiz.fajary@email.com>",
-    "Dasapta E. Irawan <dasaptaerwin@gmail.com>"
+    "Faiz R. Fajary",
+    "Nurjanna J. Trilaksono",
+    "Dasapta E. Irawan",
 ]
 license = "MIT"
 readme = "README.md"

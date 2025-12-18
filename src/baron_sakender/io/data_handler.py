@@ -263,7 +263,7 @@ class DataHandler:
             nc.references = "Orszag & Tang (1979); Stone et al. (2008)"
             
             # Author info
-            nc.author = "Sandy H. S. Herho, Faiz R. Fajary, Dasapta E. Irawan"
+            nc.author = "Sandy H. S. Herho, Faiz R. Fajary, Nurjanna J. Trilaksono, Dasapta E. Irawan"
             nc.contact = "sandy.herho@email.ucr.edu"
             nc.license = "MIT"
     
