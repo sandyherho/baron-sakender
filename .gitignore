@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Project outputs
+outputs/
+logs/
+poetry.lock
+
+# JAX cache
+__jax_cache__/
+.jax_cache/
+
+# Test outputs
+test_outputs/
+htmlcov/
+.coverage
+
+# Jupyter
+.ipynb_checkpoints/
+
+# GIF files (except in .assets/)
+*.gif
+!.assets/*.gif
+
+# NetCDF files
+*.nc
+
+# Large data files
+*.hdf5
+*.h5

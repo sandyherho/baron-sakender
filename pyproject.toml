@@ -1,0 +1,67 @@
+[tool.poetry]
+name = "baron-sakender"
+version = "0.0.1"
+description = "JAX-Accelerated 2D Ideal MHD Solver with Comprehensive Turbulence and Conservation Metrics"
+authors = [
+    "Sandy H. S. Herho <sandy.herho@email.ucr.edu>",
+    "Faiz R. Fajary <faiz.fajary@email.com>",
+    "Dasapta E. Irawan <dasaptaerwin@gmail.com>"
+]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/sandyherho/baron-sakender"
+repository = "https://github.com/sandyherho/baron-sakender"
+keywords = [
+    "mhd", "magnetohydrodynamics", "turbulence", "jax",
+    "plasma-physics", "orszag-tang", "computational-physics",
+    "conservation-laws", "information-theory"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+packages = [{include = "baron_sakender", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = ">=1.20.0"
+scipy = ">=1.7.0"
+matplotlib = ">=3.5.0"
+pandas = ">=1.3.0"
+netCDF4 = ">=1.5.0"
+Pillow = ">=9.0.0"
+tqdm = ">=4.60.0"
+jax = ">=0.4.0"
+jaxlib = ">=0.4.0"
+
+[tool.poetry.group.dev.dependencies]
+black = ">=22.0.0"
+pytest = ">=7.0.0"
+pytest-cov = ">=4.0.0"
+
+[tool.poetry.scripts]
+baron-sakender = "baron_sakender.cli:main"
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

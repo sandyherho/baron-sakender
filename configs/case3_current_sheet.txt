@@ -1,0 +1,42 @@
+# Case 3: Current Sheet Configuration
+# Harris-like current sheet for reconnection studies
+scenario_name = Case 3 - Current Sheet
+
+# Grid parameters
+nx = 256
+ny = 256
+Lx = 6.283185307179586
+Ly = 6.283185307179586
+
+# Physical parameters
+gamma = 1.6666666666666667
+
+# Physical reference units (SI)
+rho_0 = 1.0e-12
+B_0 = 1.0e-9
+L_0 = 1.0e6
+
+# Simulation parameters
+t_end = 2.5
+save_dt = 0.05
+cfl = 0.4
+
+# Initialization
+init_type = current_sheet
+width = 0.2
+
+# Computation options
+use_gpu = false
+compute_metrics = true
+
+# Output options
+save_csv = true
+save_netcdf = true
+save_png = true
+save_gif = true
+output_dir = outputs
+
+# Animation settings
+animation_fps = 20
+animation_dpi = 100
+png_dpi = 150

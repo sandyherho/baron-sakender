@@ -1,0 +1,43 @@
+# Case 4: Circularly Polarized Alfvén Wave
+# Tests wave propagation and conservation properties
+scenario_name = Case 4 - Alfven Wave
+
+# Grid parameters
+nx = 128
+ny = 128
+Lx = 6.283185307179586
+Ly = 6.283185307179586
+
+# Physical parameters
+gamma = 1.6666666666666667
+
+# Physical reference units (SI)
+rho_0 = 1.0e-12
+B_0 = 1.0e-9
+L_0 = 1.0e6
+
+# Simulation parameters
+t_end = 4.0
+save_dt = 0.1
+cfl = 0.4
+
+# Initialization
+init_type = alfven_wave
+amplitude = 0.1
+wavenumber = 2
+
+# Computation options
+use_gpu = false
+compute_metrics = true
+
+# Output options
+save_csv = true
+save_netcdf = true
+save_png = true
+save_gif = true
+output_dir = outputs
+
+# Animation settings
+animation_fps = 15
+animation_dpi = 100
+png_dpi = 150
