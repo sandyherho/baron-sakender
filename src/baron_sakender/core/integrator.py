@@ -23,8 +23,9 @@ import jax
 import jax.numpy as jnp
 from jax import jit
 from functools import partial
-from typing import Tuple, Callable, Optional
+from typing import Tuple, Callable, Optional, Dict, Any, List
 import numpy as np
+from tqdm import tqdm
 
 
 # ============================================================================
@@ -439,23 +440,17 @@ class MHDIntegrator:
         >>> from baron_sakender.core.mhd_system import MHDSystem
         >>> system = MHDSystem(nx=256, ny=256)
         >>> system.init_orszag_tang()
-        >>> integrator = MHDIntegrator(system, cfl=0.4)
-        >>> t, U = integrator.step()  # Single time step
-        >>> integrator.evolve(t_end=1.0)  # Evolve to t=1.0
+        >>> solver = MHDIntegrator(cfl=0.4)
+        >>> result = solver.run(system, t_end=1.0, save_dt=0.1)
     
     Attributes:
-        system: MHDSystem instance
         cfl: CFL number for time stepping
-        gamma: Adiabatic index
-        dx, dy: Grid spacing
-        t: Current simulation time
-        U: Current state array (JAX array)
-        c_h: Current cleaning wave speed
+        use_gpu: Whether to use GPU acceleration
+        backend: 'gpu' or 'cpu'
     """
     
     def __init__(
         self,
-        system,
         cfl: float = 0.4,
         use_gpu: bool = False
     ):
@@ -463,157 +458,210 @@ class MHDIntegrator:
         Initialize the integrator.
         
         Args:
-            system: MHDSystem instance with initial conditions
             cfl: CFL number (default 0.4, conservative for HLL)
             use_gpu: Whether to use GPU acceleration
         """
-        self.system = system
         self.cfl = cfl
-        self.gamma = system.gamma
-        self.dx = system.dx
-        self.dy = system.dy
+        self.use_gpu = use_gpu
         
         # Configure JAX device
         if use_gpu:
             try:
                 jax.devices('gpu')
+                self.backend = 'gpu'
             except RuntimeError:
                 print("Warning: GPU not available, using CPU")
-        
-        # Initialize state (convert to JAX array)
-        self.U = jnp.array(system.U)
-        self.t = 0.0
-        
-        # Initial cleaning speed
-        self.c_h = float(_compute_max_speed(self.U, self.gamma))
-        
-        # Track step count
-        self.step_count = 0
+                self.backend = 'cpu'
+        else:
+            self.backend = 'cpu'
     
-    def compute_dt(self) -> float:
+    def _compute_dt(self, U: jnp.ndarray, dx: float, dy: float, gamma: float) -> float:
         """
         Compute time step based on CFL condition.
         
         Δt = CFL * min(Δx, Δy) / max(|v| + c_f)
         """
-        max_speed = float(_compute_max_speed(self.U, self.gamma))
+        max_speed = float(_compute_max_speed(U, gamma))
         max_speed = max(max_speed, 1e-10)  # Avoid division by zero
         
-        dt = self.cfl * min(self.dx, self.dy) / max_speed
+        dt = self.cfl * min(dx, dy) / max_speed
         
         return dt
     
-    def step(self, dt: Optional[float] = None) -> Tuple[float, jnp.ndarray]:
-        """
-        Perform a single time step.
-        
-        Args:
-            dt: Time step (computed from CFL if None)
-        
-        Returns:
-            Tuple of (new_time, new_state)
-        """
-        if dt is None:
-            dt = self.compute_dt()
-        
-        # Update cleaning speed
-        self.c_h = float(_compute_max_speed(self.U, self.gamma))
-        
-        # RK2 step
-        self.U = _rk2_step(self.U, self.dx, self.dy, dt, self.gamma, self.c_h)
-        
-        # Update time
-        self.t += dt
-        self.step_count += 1
-        
-        return self.t, self.U
-    
-    def evolve(
+    def run(
         self,
+        system,
         t_end: float,
-        callback: Optional[Callable] = None,
-        callback_interval: float = 0.1,
-        max_steps: int = 1000000
-    ) -> Tuple[float, jnp.ndarray]:
+        save_dt: float = 0.1,
+        verbose: bool = True
+    ) -> Dict[str, Any]:
         """
-        Evolve the system to a target time.
+        Run MHD simulation.
         
         Args:
-            t_end: Target final time
-            callback: Optional function called periodically with (t, U)
-            callback_interval: Time interval between callbacks
-            max_steps: Maximum number of steps (safety limit)
+            system: MHDSystem instance with initial conditions
+            t_end: Final simulation time
+            save_dt: Time interval for saving snapshots
+            verbose: Print progress
         
         Returns:
-            Tuple of (final_time, final_state)
+            Dictionary with simulation results
         """
-        next_callback = self.t + callback_interval
-        steps = 0
+        if not system._initialized:
+            raise ValueError("MHD system not initialized. Call init_* method first.")
         
-        while self.t < t_end and steps < max_steps:
-            # Compute dt, potentially reducing to hit t_end exactly
-            dt = self.compute_dt()
-            if self.t + dt > t_end:
-                dt = t_end - self.t
+        # Extract parameters
+        gamma = system.gamma
+        dx = system.dx
+        dy = system.dy
+        
+        # Initialize state (convert to JAX array)
+        U = jnp.array(system.U)
+        t = 0.0
+        
+        # Storage
+        snapshots = [(0.0, np.array(U))]
+        next_save = save_dt
+        step_count = 0
+        
+        # Progress bar
+        if verbose:
+            pbar = tqdm(total=int(t_end / save_dt), desc="      Simulating", unit="snap")
+        
+        while t < t_end:
+            # Compute time step
+            c_h = float(_compute_max_speed(U, gamma))
+            dt = self._compute_dt(U, dx, dy, gamma)
             
-            # Take step
-            self.step(dt)
-            steps += 1
+            # Don't overshoot
+            if t + dt > t_end:
+                dt = t_end - t
             
-            # Callback
-            if callback is not None and self.t >= next_callback:
-                callback(self.t, self.U)
-                next_callback = self.t + callback_interval
+            # RK2 step
+            U = _rk2_step(U, dx, dy, dt, gamma, c_h)
+            t += dt
+            step_count += 1
+            
+            # Save snapshot
+            if t >= next_save or t >= t_end:
+                snapshots.append((t, np.array(U)))
+                next_save += save_dt
+                if verbose:
+                    pbar.update(1)
         
-        if steps >= max_steps:
-            print(f"Warning: Reached maximum steps ({max_steps})")
-        
-        return self.t, self.U
-    
-    def get_state(self) -> np.ndarray:
-        """Get current state as NumPy array."""
-        return np.array(self.U)
-    
-    def set_state(self, U: np.ndarray):
-        """Set state from NumPy array."""
-        self.U = jnp.array(U)
-    
-    def get_diagnostics(self) -> dict:
-        """
-        Get current diagnostic quantities.
-        
-        Returns:
-            Dictionary with diagnostic values
-        """
-        U = self.U
-        rho, vx, vy, Bx, By, p, psi = _get_primitive(U, self.gamma)
-        
-        # Compute various diagnostics
-        dV = self.dx * self.dy
+        if verbose:
+            pbar.close()
         
         return {
-            'time': self.t,
-            'step_count': self.step_count,
-            'dt': self.compute_dt(),
-            'c_h': self.c_h,
-            'total_mass': float(jnp.sum(rho) * dV),
-            'total_energy': float(jnp.sum(U[5]) * dV),
-            'kinetic_energy': float(0.5 * jnp.sum(rho * (vx**2 + vy**2)) * dV),
-            'magnetic_energy': float(0.5 * jnp.sum(Bx**2 + By**2) * dV),
-            'max_div_B': float(jnp.max(jnp.abs(
-                (jnp.roll(Bx, -1, axis=0) - jnp.roll(Bx, 1, axis=0)) / (2*self.dx) +
-                (jnp.roll(By, -1, axis=1) - jnp.roll(By, 1, axis=1)) / (2*self.dy)
-            ))),
-            'min_density': float(jnp.min(rho)),
-            'min_pressure': float(jnp.min(p)),
-            'max_velocity': float(jnp.max(jnp.sqrt(vx**2 + vy**2))),
-            'max_psi': float(jnp.max(jnp.abs(psi))),
+            'snapshots': snapshots,
+            'system': system,
+            'params': system.params,
+            't_end': t_end,
+            'n_snapshots': len(snapshots),
+            'total_steps': step_count,
+            'backend': self.backend,
+        }
+    
+    def run_with_diagnostics(
+        self,
+        system,
+        t_end: float,
+        save_dt: float = 0.1,
+        verbose: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Run simulation with diagnostic tracking.
+        
+        Args:
+            system: MHDSystem instance with initial conditions
+            t_end: Final simulation time
+            save_dt: Time interval for saving snapshots
+            verbose: Print progress
+        
+        Returns:
+            Dictionary with simulation results and diagnostics
+        """
+        from .metrics import compute_conservation_metrics, compute_stability_metrics
+        
+        if not system._initialized:
+            raise ValueError("MHD system not initialized. Call init_* method first.")
+        
+        # Extract parameters
+        gamma = system.gamma
+        dx = system.dx
+        dy = system.dy
+        
+        # Initialize state
+        U = jnp.array(system.U)
+        t = 0.0
+        
+        # Storage
+        snapshots = [(0.0, np.array(U))]
+        times = [0.0]
+        conservation_history = []
+        stability_history = []
+        next_save = save_dt
+        step_count = 0
+        
+        # Initial diagnostics
+        U_np = np.array(U)
+        cons = compute_conservation_metrics(U_np, dx, dy, gamma)
+        stab = compute_stability_metrics(U_np, dx, dy, gamma, dt=0.001, cfl=self.cfl)
+        conservation_history.append(cons)
+        stability_history.append(stab)
+        
+        # Progress bar
+        if verbose:
+            pbar = tqdm(total=int(t_end / save_dt), desc="      Simulating", unit="snap")
+        
+        while t < t_end:
+            # Compute time step
+            c_h = float(_compute_max_speed(U, gamma))
+            dt = self._compute_dt(U, dx, dy, gamma)
+            
+            # Don't overshoot
+            if t + dt > t_end:
+                dt = t_end - t
+            
+            # RK2 step
+            U = _rk2_step(U, dx, dy, dt, gamma, c_h)
+            t += dt
+            step_count += 1
+            
+            # Save snapshot and diagnostics
+            if t >= next_save or t >= t_end:
+                U_np = np.array(U)
+                snapshots.append((t, U_np))
+                times.append(t)
+                
+                cons = compute_conservation_metrics(U_np, dx, dy, gamma)
+                stab = compute_stability_metrics(U_np, dx, dy, gamma, dt=dt, cfl=self.cfl)
+                conservation_history.append(cons)
+                stability_history.append(stab)
+                
+                next_save += save_dt
+                if verbose:
+                    pbar.update(1)
+        
+        if verbose:
+            pbar.close()
+        
+        return {
+            'snapshots': snapshots,
+            'system': system,
+            'params': system.params,
+            'times': np.array(times),
+            't_end': t_end,
+            'n_snapshots': len(snapshots),
+            'total_steps': step_count,
+            'backend': self.backend,
+            'conservation_history': conservation_history,
+            'stability_history': stability_history,
         }
     
     def __repr__(self) -> str:
         return (
-            f"MHDIntegrator(t={self.t:.4f}, steps={self.step_count}, "
-            f"cfl={self.cfl}, solver='HLL')"
+            f"MHDIntegrator(cfl={self.cfl}, backend='{self.backend}', solver='HLL')"
         )
 
 
