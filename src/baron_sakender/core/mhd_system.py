@@ -280,30 +280,62 @@ class MHDSystem:
         self._initialized = True
         self._init_type = 'strong_magnetic'
     
-    def init_current_sheet(self, width: float = 0.2):
+    def init_current_sheet(self, width: float = 0.2, perturbation: float = 0.01):
         """
-        Initialize current sheet configuration.
+        Initialize Harris-like current sheet configuration.
+        
+        Creates a current sheet with Bx varying in y (not x!) so that
+        J_z = ∂B_x/∂y ≠ 0. Includes optional perturbation to trigger
+        tearing mode instability.
+        
+        The Harris sheet equilibrium:
+            Bx = B0 * tanh((y - Ly/2) / w)
+            By = perturbation * sin(2πx/Lx)
+            ρ = ρ0 * (1 + 1/cosh²((y - Ly/2) / w))  (pressure balance)
+            p adjusted for total pressure balance
         
         Args:
             width: Current sheet width [L₀]
+            perturbation: Amplitude of By perturbation to seed instability
         """
         gamma = self.gamma
         
-        # Uniform density
-        rho = np.ones((self.nx, self.ny))
+        # Current sheet center at y = Ly/2
+        y_center = self.params.Ly / 2
         
-        # No initial flow
+        # Harris sheet profile: Bx = B0 * tanh((y - y_center) / width)
+        # This creates J_z = dBx/dy = B0/width * sech²((y - y_center)/width)
+        B0 = 1.0
+        Bx = B0 * np.tanh((self.Y - y_center) / width)
+        
+        # Small By perturbation to trigger tearing instability
+        # Using a sinusoidal perturbation in x
+        By = perturbation * np.sin(2 * np.pi * self.X / self.params.Lx)
+        
+        # Density profile for pressure balance
+        # In Harris equilibrium: p + B²/2 = const
+        # Use enhanced density in the current sheet for stability
+        sech2 = 1.0 / np.cosh((self.Y - y_center) / width)**2
+        rho = 1.0 + 0.5 * sech2  # Enhanced density in sheet
+        
+        # Ensure minimum density
+        rho = np.maximum(rho, 0.2)
+        
+        # No initial flow (quiescent state)
         vx = np.zeros((self.nx, self.ny))
         vy = np.zeros((self.nx, self.ny))
         
-        # Harris-like current sheet
-        x_center = self.params.Lx / 2
-        Bx = np.tanh((self.X - x_center) / width)
-        By = np.zeros((self.nx, self.ny))
+        # Pressure for total pressure balance
+        # P_total = p + B²/2 = const = p_inf + B0²/2
+        # where p_inf is pressure far from sheet (where Bx → ±B0)
+        p_inf = 0.5  # Background pressure
+        magnetic_pressure = 0.5 * (Bx**2 + By**2)
+        p = p_inf + 0.5 * B0**2 - magnetic_pressure
         
-        # Pressure balance
-        p = 0.5 * (1 - Bx**2) + 0.1
+        # Ensure minimum pressure
+        p = np.maximum(p, 0.1)
         
+        # Set conservative variables
         self.U[0] = rho
         self.U[1] = rho * vx
         self.U[2] = rho * vy
@@ -325,9 +357,16 @@ class MHDSystem:
         """
         Initialize circularly polarized Alfvén wave.
         
+        Alfvén waves are exact nonlinear solutions of ideal MHD.
+        For a wave propagating along x with background field B0x:
+            δvy = A * sin(kx)
+            δBy = A * sin(kx)  (for rightward propagating wave)
+        
+        The perturbations satisfy δv = ±δB/√ρ (Alfvén relation).
+        
         Args:
             amplitude: Wave amplitude
-            k: Wavenumber
+            k: Wavenumber (number of wavelengths in domain)
         """
         gamma = self.gamma
         
@@ -340,9 +379,12 @@ class MHDSystem:
         vx = np.zeros((self.nx, self.ny))
         vy = amplitude * np.sin(phase)
         
+        # Background Bx + perturbation By
+        # For Alfvén wave: δBy = δvy * √ρ (in normalized units with vA = 1)
         Bx = B0 * np.ones((self.nx, self.ny))
         By = amplitude * np.sin(phase)
         
+        # Pressure (uniform background)
         p = 0.1 * np.ones((self.nx, self.ny))
         
         self.U[0] = rho

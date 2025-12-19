@@ -1,30 +1,29 @@
-"""Core solver components for 2D Ideal MHD analysis."""
+"""
+Baron-Sakender Core Module.
+
+2D Ideal MHD Solver with JAX acceleration.
+
+Components:
+    - MHDSystem: Physical system definition and initial conditions
+    - MHDIntegrator: Time integration with HLL Riemann solver
+    - metrics: Comprehensive diagnostic metrics
+
+Example:
+    >>> from baron_sakender.core import MHDSystem, MHDIntegrator
+    >>> system = MHDSystem(nx=256, ny=256)
+    >>> system.init_orszag_tang()
+    >>> integrator = MHDIntegrator(system, cfl=0.4)
+    >>> integrator.evolve(t_end=1.0)
+"""
 
 from .mhd_system import MHDSystem, MHDParams
-from .integrator import MHDSolver
-from .metrics import (
-    compute_conservation_metrics,
-    compute_stability_metrics,
-    compute_turbulence_metrics,
-    compute_information_metrics,
-    compute_composite_metrics,
-    compute_all_metrics,
-    compute_diagnostics,
-    compute_energy_spectrum,
-    compute_structure_functions,
-)
+from .integrator import MHDIntegrator, MHDSolver
+from . import metrics
 
 __all__ = [
-    "MHDSystem",
-    "MHDParams",
-    "MHDSolver",
-    "compute_conservation_metrics",
-    "compute_stability_metrics",
-    "compute_turbulence_metrics",
-    "compute_information_metrics",
-    "compute_composite_metrics",
-    "compute_all_metrics",
-    "compute_diagnostics",
-    "compute_energy_spectrum",
-    "compute_structure_functions",
+    'MHDSystem',
+    'MHDParams', 
+    'MHDIntegrator',
+    'MHDSolver',  # Backward compatibility
+    'metrics',
 ]

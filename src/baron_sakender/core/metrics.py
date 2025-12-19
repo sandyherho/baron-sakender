@@ -35,7 +35,7 @@ def compute_diagnostics(
     Compute basic diagnostic fields from conservative variables.
     
     Args:
-        U: Conservative variables [6, nx, ny]
+        U: Conservative variables [7, nx, ny]
         dx, dy: Grid spacing
         gamma: Adiabatic index
     
@@ -86,7 +86,7 @@ def compute_conservation_metrics(
         - Magnetic flux: Φ = ∫ B dA (in 2D, ∫Bx and ∫By)
     
     Args:
-        U: Conservative variables [6, nx, ny]
+        U: Conservative variables [7, nx, ny]
         dx, dy: Grid spacing
         gamma: Adiabatic index
     
@@ -208,10 +208,10 @@ def compute_stability_metrics(
     # Velocity magnitude
     v_mag = np.sqrt(vx**2 + vy**2)
     
-    # Mach numbers
-    mach_sonic = v_mag / cs
+    # Mach numbers (avoid division by zero)
+    mach_sonic = v_mag / (cs + 1e-10)
     mach_alfven = v_mag / (v_A + 1e-10)
-    mach_fast = v_mag / cf
+    mach_fast = v_mag / (cf + 1e-10)
     
     # Plasma beta = 2 * thermal_pressure / magnetic_pressure
     beta = 2 * p / (Bx**2 + By**2 + 1e-10)
@@ -327,6 +327,93 @@ def compute_energy_spectrum(
     return k_centers, E_kinetic_1d, E_magnetic_1d
 
 
+def fit_spectral_index(
+    k: np.ndarray, 
+    E: np.ndarray, 
+    nx: int,
+    k_min_factor: float = 3.0,
+    k_max_factor: float = 8.0,
+    energy_threshold: float = 1e-6
+) -> float:
+    """
+    Fit power-law spectral index in the inertial range.
+    
+    The inertial range is selected based on:
+    1. Resolution-dependent wavenumber bounds
+    2. Energy threshold to exclude noise floor
+    3. Sufficient data points for reliable fit
+    
+    For MHD turbulence, expected indices are:
+        - Kolmogorov: -5/3 ≈ -1.67
+        - Iroshnikov-Kraichnan: -3/2 = -1.50
+        - Steep spectra (> -3) indicate numerical dissipation dominance
+    
+    Args:
+        k: Wavenumber array
+        E: Energy spectrum array
+        nx: Grid resolution (for setting k_max)
+        k_min_factor: Minimum k as multiple of fundamental wavenumber
+        k_max_factor: Maximum k as fraction of Nyquist (nx / k_max_factor)
+        energy_threshold: Minimum relative energy for inclusion
+    
+    Returns:
+        Spectral index (slope of log-log fit), or NaN if fit fails
+    """
+    # Fundamental wavenumber
+    k_fundamental = k[k > 0][0] if np.any(k > 0) else 1.0
+    
+    # Resolution-dependent bounds
+    # k_min: Skip the first few modes (energy injection scale)
+    k_min = k_min_factor * k_fundamental
+    
+    # k_max: Stay well below Nyquist to avoid dissipation range
+    # For first-order HLL, dissipation starts early (~nx/8 or so)
+    k_nyquist = np.pi * nx / (2 * np.pi)  # Approximate Nyquist
+    k_max = k_nyquist / k_max_factor
+    
+    # Ensure k_max > k_min
+    if k_max <= k_min:
+        k_max = 2 * k_min
+    
+    # Energy threshold (relative to peak)
+    E_max = np.max(E)
+    E_threshold = energy_threshold * E_max
+    
+    # Select inertial range
+    valid = (
+        (k > k_min) & 
+        (k < k_max) & 
+        (E > E_threshold) & 
+        (E > 0) &
+        np.isfinite(E)
+    )
+    
+    # Need at least 5 points for reliable fit
+    if np.sum(valid) < 5:
+        return np.nan
+    
+    # Log-log linear regression
+    log_k = np.log10(k[valid])
+    log_E = np.log10(E[valid])
+    
+    # Check for valid log values
+    if not (np.all(np.isfinite(log_k)) and np.all(np.isfinite(log_E))):
+        return np.nan
+    
+    try:
+        coeffs = np.polyfit(log_k, log_E, 1)
+        spectral_index = coeffs[0]
+        
+        # Sanity check: physical spectra should be between 0 and -6
+        # Steeper than -6 indicates numerical artifacts
+        if spectral_index < -6 or spectral_index > 1:
+            return np.nan
+            
+        return float(spectral_index)
+    except (np.linalg.LinAlgError, ValueError):
+        return np.nan
+
+
 def compute_structure_functions(
     field: np.ndarray,
     max_lag: int = 50,
@@ -394,6 +481,7 @@ def compute_turbulence_metrics(
         Dictionary with turbulence metrics
     """
     dV = dx * dy
+    nx, ny = U.shape[1], U.shape[2]
     
     rho = U[0]
     vx = U[1] / rho
@@ -424,6 +512,7 @@ def compute_turbulence_metrics(
     current_squared = np.sum(Jz**2) * dV
     mean_current = np.mean(np.abs(Jz))
     max_current = np.max(np.abs(Jz))
+    current_density_rms = np.sqrt(np.mean(Jz**2))
     
     # ---- Cross Helicity & Residual Energy ----
     cross_helicity = np.sum(vx * Bx + vy * By) * dV
@@ -448,35 +537,35 @@ def compute_turbulence_metrics(
     # Imbalance
     energy_imbalance = (zp_energy - zm_energy) / (zp_energy + zm_energy + 1e-10)
     
-    # ---- Spectra (optional, can be slow) ----
-    k_centers, E_k, E_m = compute_energy_spectrum(U, dx, dy, gamma, n_bins=30)
+    # ---- Spectra ----
+    n_bins = min(30, nx // 4)  # Adjust bins based on resolution
+    k_centers, E_k, E_m = compute_energy_spectrum(U, dx, dy, gamma, n_bins=n_bins)
     
-    # Fit spectral index in inertial range
-    valid = (k_centers > k_centers[5]) & (k_centers < k_centers[-5]) & (E_k > 0)
-    if np.sum(valid) > 5:
-        log_k = np.log10(k_centers[valid])
-        log_E_k = np.log10(E_k[valid] + 1e-20)
-        log_E_m = np.log10(E_m[valid] + 1e-20)
-        
-        coeffs_k = np.polyfit(log_k, log_E_k, 1)
-        coeffs_m = np.polyfit(log_k, log_E_m, 1)
-        
-        spectral_index_kinetic = coeffs_k[0]
-        spectral_index_magnetic = coeffs_m[0]
-    else:
-        spectral_index_kinetic = np.nan
-        spectral_index_magnetic = np.nan
+    # Fit spectral indices with improved algorithm
+    spectral_index_kinetic = fit_spectral_index(k_centers, E_k, nx)
+    spectral_index_magnetic = fit_spectral_index(k_centers, E_m, nx)
     
     # ---- Intermittency (kurtosis) ----
-    vorticity_kurtosis = np.mean(omega_z**4) / (np.mean(omega_z**2)**2 + 1e-10)
-    current_kurtosis = np.mean(Jz**4) / (np.mean(Jz**2)**2 + 1e-10)
+    # Avoid division by zero for uniform fields
+    omega_var = np.mean(omega_z**2)
+    Jz_var = np.mean(Jz**2)
+    
+    if omega_var > 1e-20:
+        vorticity_kurtosis = np.mean(omega_z**4) / (omega_var**2)
+    else:
+        vorticity_kurtosis = 0.0
+        
+    if Jz_var > 1e-20:
+        current_kurtosis = np.mean(Jz**4) / (Jz_var**2)
+    else:
+        current_kurtosis = 0.0
     
     # ---- Characteristic Scales ----
     # Taylor microscale (approximate)
-    lambda_taylor = np.sqrt(v_mag.var() / (mean_vorticity**2 + 1e-10))
-    
-    # Integral scale (from autocorrelation)
-    L_integral = np.nan  # Would need proper autocorrelation
+    if mean_vorticity > 1e-10:
+        lambda_taylor = np.sqrt(v_mag.var() / (mean_vorticity**2 + 1e-10))
+    else:
+        lambda_taylor = np.nan
     
     return {
         # Energy
@@ -494,6 +583,7 @@ def compute_turbulence_metrics(
         'current_squared_integral': float(current_squared),
         'mean_current_density': float(mean_current),
         'max_current_density': float(max_current),
+        'current_density_rms': float(current_density_rms),
         
         # Helicity & residual energy
         'cross_helicity': float(cross_helicity),
@@ -507,8 +597,8 @@ def compute_turbulence_metrics(
         'energy_imbalance': float(energy_imbalance),
         
         # Spectra
-        'spectral_index_kinetic': float(spectral_index_kinetic),
-        'spectral_index_magnetic': float(spectral_index_magnetic),
+        'spectral_index_kinetic': float(spectral_index_kinetic) if not np.isnan(spectral_index_kinetic) else np.nan,
+        'spectral_index_magnetic': float(spectral_index_magnetic) if not np.isnan(spectral_index_magnetic) else np.nan,
         'k_spectrum': k_centers.tolist(),
         'E_kinetic_spectrum': E_k.tolist(),
         'E_magnetic_spectrum': E_m.tolist(),
@@ -539,8 +629,14 @@ def compute_shannon_entropy(field: np.ndarray, n_bins: int = 64) -> float:
     Returns:
         Shannon entropy in bits
     """
+    # Handle constant fields
+    if np.std(field) < 1e-15:
+        return 0.0
+    
     hist, _ = np.histogram(field.flatten(), bins=n_bins, density=True)
     hist = hist[hist > 0]  # Remove zeros
+    if len(hist) == 0:
+        return 0.0
     return float(scipy_entropy(hist, base=2))
 
 
@@ -548,10 +644,16 @@ def compute_joint_entropy(field1: np.ndarray, field2: np.ndarray, n_bins: int = 
     """
     Compute joint Shannon entropy H(X,Y).
     """
+    # Handle constant fields
+    if np.std(field1) < 1e-15 or np.std(field2) < 1e-15:
+        return 0.0
+    
     hist_2d, _, _ = np.histogram2d(
         field1.flatten(), field2.flatten(), bins=n_bins, density=True
     )
     hist_2d = hist_2d[hist_2d > 0]
+    if len(hist_2d) == 0:
+        return 0.0
     return float(scipy_entropy(hist_2d.flatten(), base=2))
 
 
@@ -563,7 +665,9 @@ def compute_mutual_information(field1: np.ndarray, field2: np.ndarray, n_bins: i
     H_y = compute_shannon_entropy(field2, n_bins)
     H_xy = compute_joint_entropy(field1, field2, n_bins)
     
-    return float(H_x + H_y - H_xy)
+    # Mutual information should be non-negative
+    MI = max(0.0, H_x + H_y - H_xy)
+    return float(MI)
 
 
 def compute_permutation_entropy(series: np.ndarray, order: int = 3, delay: int = 1) -> float:
@@ -586,6 +690,10 @@ def compute_permutation_entropy(series: np.ndarray, order: int = 3, delay: int =
     if n_patterns <= 0:
         return np.nan
     
+    # Handle constant series
+    if np.std(series) < 1e-15:
+        return 0.0
+    
     # Extract patterns
     patterns = []
     for i in range(n_patterns):
@@ -602,7 +710,7 @@ def compute_permutation_entropy(series: np.ndarray, order: int = 3, delay: int =
     # Normalize by maximum possible entropy
     H_max = np.log2(factorial(order))
     
-    return float(H / H_max)
+    return float(H / H_max) if H_max > 0 else 0.0
 
 
 def compute_complexity_index(field: np.ndarray, n_bins: int = 32) -> float:
@@ -619,6 +727,10 @@ def compute_complexity_index(field: np.ndarray, n_bins: int = 32) -> float:
     Returns:
         Statistical complexity
     """
+    # Handle constant fields
+    if np.std(field) < 1e-15:
+        return 0.0
+    
     hist, _ = np.histogram(field.flatten(), bins=n_bins, density=True)
     hist = hist / (np.sum(hist) + 1e-10)  # Ensure normalization
     
@@ -754,25 +866,26 @@ def compute_information_metrics(
     
     return {
         # Shannon entropy
-        'entropy_density': H_density,
-        'entropy_velocity': H_velocity,
-        'entropy_magnetic': H_magnetic,
-        'entropy_vorticity': H_vorticity,
-        'entropy_current': H_current,
+        'shannon_entropy_density': H_density,
+        'shannon_entropy_velocity': H_velocity,
+        'shannon_entropy_magnetic': H_magnetic,
+        'shannon_entropy_vorticity': H_vorticity,
+        'shannon_entropy_current': H_current,
         'total_information_content': total_information,
         
         # Mutual information
-        'MI_vx_Bx': MI_vx_Bx,
-        'MI_vy_By': MI_vy_By,
-        'MI_velocity_magnetic': MI_vmag_Bmag,
-        'MI_vorticity_current': MI_vorticity_current,
+        'mutual_information_vx_Bx': MI_vx_Bx,
+        'mutual_information_vy_By': MI_vy_By,
+        'mutual_information_v_B': MI_vmag_Bmag,
+        'mutual_information_vorticity_current': MI_vorticity_current,
         
         # Statistical complexity
-        'complexity_density': C_density,
-        'complexity_velocity': C_velocity,
-        'complexity_magnetic': C_magnetic,
-        'complexity_vorticity': C_vorticity,
-        'complexity_current': C_current,
+        'statistical_complexity_density': C_density,
+        'statistical_complexity_velocity': C_velocity,
+        'statistical_complexity_magnetic': C_magnetic,
+        'statistical_complexity_vorticity': C_vorticity,
+        'statistical_complexity_current': C_current,
+        'statistical_complexity': np.mean([C_density, C_velocity, C_magnetic, C_vorticity, C_current]),
         
         # Multiscale entropy
         'mse_scales': scales_v.tolist(),
@@ -780,10 +893,10 @@ def compute_information_metrics(
         'mse_magnetic': mse_magnetic.tolist(),
         
         # Permutation entropy
-        'PE_vx': PE_vx,
-        'PE_vy': PE_vy,
-        'PE_Bx': PE_Bx,
-        'PE_By': PE_By,
+        'permutation_entropy_vx': PE_vx,
+        'permutation_entropy_vy': PE_vy,
+        'permutation_entropy_Bx': PE_Bx,
+        'permutation_entropy_By': PE_By,
     }
 
 
@@ -824,6 +937,7 @@ def compute_composite_metrics(
     By = U[4]
     
     dV = dx * dy
+    nx, ny = U.shape[1], U.shape[2]
     v_mag = np.sqrt(vx**2 + vy**2)
     B_mag = np.sqrt(Bx**2 + By**2)
     
@@ -840,65 +954,113 @@ def compute_composite_metrics(
     
     # ---- 2. MHD Complexity Index ----
     # Combines entropy and structure measures
-    H_omega = compute_shannon_entropy(omega_z, n_bins=32)
-    H_J = compute_shannon_entropy(Jz, n_bins=32)
-    C_omega = compute_complexity_index(omega_z, n_bins=32)
-    C_J = compute_complexity_index(Jz, n_bins=32)
+    # Handle uniform fields
+    omega_std = np.std(omega_z)
+    Jz_std = np.std(Jz)
+    
+    if omega_std > 1e-15:
+        H_omega = compute_shannon_entropy(omega_z, n_bins=32)
+        C_omega = compute_complexity_index(omega_z, n_bins=32)
+    else:
+        H_omega = 0.0
+        C_omega = 0.0
+    
+    if Jz_std > 1e-15:
+        H_J = compute_shannon_entropy(Jz, n_bins=32)
+        C_J = compute_complexity_index(Jz, n_bins=32)
+    else:
+        H_J = 0.0
+        C_J = 0.0
     
     mhd_complexity_index = np.sqrt(
-        (H_omega * C_omega + H_J * C_J) / 2
+        (H_omega * C_omega + H_J * C_J) / 2 + 1e-10
     )
     
     # ---- 3. Coherent Structure Index ----
     # Based on Q-criterion analog for MHD
-    S_v = 0.5 * (
-        (np.roll(vx, -1, axis=0) - np.roll(vx, 1, axis=0)) / (2*dx) +
-        (np.roll(vy, -1, axis=1) - np.roll(vy, 1, axis=1)) / (2*dy)
-    )
-    
-    # |ω|² - |S|² criterion (vorticity vs strain)
-    Q_criterion = omega_z**2 - S_v**2
-    coherent_area = np.sum(Q_criterion > np.std(Q_criterion)) / Q_criterion.size
+    # Handle uniform fields
+    if omega_std > 1e-15:
+        S_v = 0.5 * (
+            (np.roll(vx, -1, axis=0) - np.roll(vx, 1, axis=0)) / (2*dx) +
+            (np.roll(vy, -1, axis=1) - np.roll(vy, 1, axis=1)) / (2*dy)
+        )
+        
+        # |ω|² - |S|² criterion (vorticity vs strain)
+        Q_criterion = omega_z**2 - S_v**2
+        Q_std = np.std(Q_criterion)
+        if Q_std > 1e-15:
+            coherent_area = np.sum(Q_criterion > np.std(Q_criterion)) / Q_criterion.size
+        else:
+            coherent_area = 0.0
+    else:
+        coherent_area = 0.0
     
     # Current sheet detection (high J regions)
-    J_threshold = np.mean(np.abs(Jz)) + 2 * np.std(np.abs(Jz))
-    current_sheet_area = np.sum(np.abs(Jz) > J_threshold) / Jz.size
+    if Jz_std > 1e-15:
+        J_threshold = np.mean(np.abs(Jz)) + 2 * np.std(np.abs(Jz))
+        current_sheet_area = np.sum(np.abs(Jz) > J_threshold) / Jz.size
+    else:
+        current_sheet_area = 0.0
     
     coherent_structure_index = 0.5 * (coherent_area + current_sheet_area)
     
     # ---- 4. Scale-Dependent Intermittency Index ----
     # Based on flatness at different scales
-    struct_omega = compute_structure_functions(omega_z, max_lag=20, orders=[2, 4])
-    struct_J = compute_structure_functions(Jz, max_lag=20, orders=[2, 4])
-    
-    # Flatness F = S_4 / S_2^2
-    flatness_omega = struct_omega['S_4'] / (struct_omega['S_2']**2 + 1e-10)
-    flatness_J = struct_J['S_4'] / (struct_J['S_2']**2 + 1e-10)
-    
-    # Intermittency increases with scale
-    intermittency_index_omega = np.mean(np.diff(np.log(flatness_omega + 1e-10)))
-    intermittency_index_J = np.mean(np.diff(np.log(flatness_J + 1e-10)))
+    if omega_std > 1e-15 and Jz_std > 1e-15:
+        struct_omega = compute_structure_functions(omega_z, max_lag=20, orders=[2, 4])
+        struct_J = compute_structure_functions(Jz, max_lag=20, orders=[2, 4])
+        
+        # Flatness F = S_4 / S_2^2
+        flatness_omega = struct_omega['S_4'] / (struct_omega['S_2']**2 + 1e-10)
+        flatness_J = struct_J['S_4'] / (struct_J['S_2']**2 + 1e-10)
+        
+        # Intermittency: rate of change of log(flatness) with scale
+        # Positive values indicate increasing intermittency at small scales
+        with np.errstate(divide='ignore', invalid='ignore'):
+            log_flatness_omega = np.log(flatness_omega + 1e-10)
+            log_flatness_J = np.log(flatness_J + 1e-10)
+            
+            valid_omega = np.isfinite(log_flatness_omega)
+            valid_J = np.isfinite(log_flatness_J)
+            
+            if np.sum(valid_omega) > 2:
+                intermittency_index_omega = np.mean(np.diff(log_flatness_omega[valid_omega]))
+            else:
+                intermittency_index_omega = 0.0
+                
+            if np.sum(valid_J) > 2:
+                intermittency_index_J = np.mean(np.diff(log_flatness_J[valid_J]))
+            else:
+                intermittency_index_J = 0.0
+    else:
+        intermittency_index_omega = 0.0
+        intermittency_index_J = 0.0
     
     intermittency_index = 0.5 * (intermittency_index_omega + intermittency_index_J)
     
     # ---- 5. Cascade Efficiency Index ----
     # Measures how efficiently energy cascades from large to small scales
-    k_centers, E_k, E_m = compute_energy_spectrum(U, dx, dy, gamma, n_bins=20)
+    n_bins = min(20, nx // 4)
+    k_centers, E_k, E_m = compute_energy_spectrum(U, dx, dy, gamma, n_bins=n_bins)
     
     # Energy in large scales (k < k_max/4) vs small scales (k > k_max/4)
-    k_transition = k_centers[len(k_centers)//4]
-    large_scale_energy = np.sum(E_k[k_centers < k_transition] + E_m[k_centers < k_transition])
-    small_scale_energy = np.sum(E_k[k_centers >= k_transition] + E_m[k_centers >= k_transition])
-    
-    cascade_efficiency = small_scale_energy / (large_scale_energy + 1e-10)
+    if len(k_centers) > 4:
+        k_transition = k_centers[len(k_centers)//4]
+        large_scale_energy = np.sum(E_k[k_centers < k_transition] + E_m[k_centers < k_transition])
+        small_scale_energy = np.sum(E_k[k_centers >= k_transition] + E_m[k_centers >= k_transition])
+        
+        cascade_efficiency = small_scale_energy / (large_scale_energy + 1e-10)
+    else:
+        cascade_efficiency = 0.0
     
     # ---- 6. Alignment Index ----
     # Measures alignment between v and B (relevant for Alfvén waves)
     v_dot_B = vx * Bx + vy * By
     v_cross_B_z = vx * By - vy * Bx
     
-    alignment = np.mean(v_dot_B) / (np.mean(v_mag * B_mag) + 1e-10)
-    perpendicularity = np.mean(np.abs(v_cross_B_z)) / (np.mean(v_mag * B_mag) + 1e-10)
+    denom = np.mean(v_mag * B_mag) + 1e-10
+    alignment = np.mean(v_dot_B) / denom
+    perpendicularity = np.mean(np.abs(v_cross_B_z)) / denom
     
     alignment_index = np.abs(alignment)
     
@@ -923,33 +1085,36 @@ def compute_composite_metrics(
     # ---- 8. Turbulent Dissipation Proxy ----
     # In 2D ideal MHD, no explicit dissipation, but we can estimate
     # from grid-scale structures
-    omega_grad = np.sqrt(
-        ((np.roll(omega_z, -1, axis=0) - np.roll(omega_z, 1, axis=0)) / (2*dx))**2 +
-        ((np.roll(omega_z, -1, axis=1) - np.roll(omega_z, 1, axis=1)) / (2*dy))**2
-    )
-    J_grad = np.sqrt(
-        ((np.roll(Jz, -1, axis=0) - np.roll(Jz, 1, axis=0)) / (2*dx))**2 +
-        ((np.roll(Jz, -1, axis=1) - np.roll(Jz, 1, axis=1)) / (2*dy))**2
-    )
-    
-    numerical_dissipation_proxy = np.mean(omega_grad**2 + J_grad**2) * dV
+    if omega_std > 1e-15 and Jz_std > 1e-15:
+        omega_grad = np.sqrt(
+            ((np.roll(omega_z, -1, axis=0) - np.roll(omega_z, 1, axis=0)) / (2*dx))**2 +
+            ((np.roll(omega_z, -1, axis=1) - np.roll(omega_z, 1, axis=1)) / (2*dy))**2
+        )
+        J_grad = np.sqrt(
+            ((np.roll(Jz, -1, axis=0) - np.roll(Jz, 1, axis=0)) / (2*dx))**2 +
+            ((np.roll(Jz, -1, axis=1) - np.roll(Jz, 1, axis=1)) / (2*dy))**2
+        )
+        
+        numerical_dissipation_proxy = np.mean(omega_grad**2 + J_grad**2) * dV
+    else:
+        numerical_dissipation_proxy = 0.0
     
     return {
-        'dynamo_efficiency_index': float(dynamo_efficiency),
-        'mhd_complexity_index': float(mhd_complexity_index),
-        'coherent_structure_index': float(coherent_structure_index),
-        'current_sheet_fraction': float(current_sheet_area),
-        'vortex_fraction': float(coherent_area),
-        'intermittency_index': float(intermittency_index),
-        'intermittency_vorticity': float(intermittency_index_omega),
-        'intermittency_current': float(intermittency_index_J),
-        'cascade_efficiency': float(cascade_efficiency),
-        'alignment_index': float(alignment_index),
-        'perpendicularity_index': float(perpendicularity),
-        'conservation_quality': float(conservation_quality),
-        'mass_conservation_error': float(mass_error) if conservation_initial else np.nan,
-        'energy_conservation_error': float(energy_error) if conservation_initial else np.nan,
-        'numerical_dissipation_proxy': float(numerical_dissipation_proxy),
+        'comp_dynamo_efficiency_index': float(dynamo_efficiency),
+        'comp_mhd_complexity_index': float(mhd_complexity_index),
+        'comp_coherent_structure_index': float(coherent_structure_index),
+        'comp_current_sheet_fraction': float(current_sheet_area),
+        'comp_vortex_fraction': float(coherent_area),
+        'comp_intermittency_index': float(intermittency_index),
+        'comp_intermittency_vorticity': float(intermittency_index_omega),
+        'comp_intermittency_current': float(intermittency_index_J),
+        'comp_cascade_efficiency': float(cascade_efficiency),
+        'comp_alignment_index': float(alignment_index),
+        'comp_perpendicularity_index': float(perpendicularity),
+        'comp_conservation_quality': float(conservation_quality) if conservation_initial else np.nan,
+        'comp_mass_conservation_error': float(mass_error) if conservation_initial else np.nan,
+        'comp_energy_conservation_error': float(energy_error) if conservation_initial else np.nan,
+        'comp_numerical_dissipation_proxy': float(numerical_dissipation_proxy),
     }
 
 
@@ -1025,6 +1190,6 @@ def compute_all_metrics(
     if verbose:
         print("      Computing composite metrics...")
     composite = compute_composite_metrics(U, dx, dy, gamma, conservation_initial, verbose=False)
-    results.update({f'comp_{k}': v for k, v in composite.items()})
+    results.update(composite)
     
     return results

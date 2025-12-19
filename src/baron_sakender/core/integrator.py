@@ -1,74 +1,55 @@
 """
-JAX-Accelerated Integrator for 2D Ideal MHD with Divergence Cleaning.
+JAX-accelerated integrator for 2D Ideal MHD with Divergence Cleaning.
 
-Implements high-performance numerical integration using JAX with
-automatic GPU/CPU backend selection. Uses HLL Riemann solver for
-robust shock capturing with RK2 time stepping and hyperbolic/parabolic
-divergence cleaning (Dedner et al. 2002).
+Implements finite volume method with:
+    - HLL (Harten-Lax-van Leer) approximate Riemann solver
+    - RK2 (Heun's method) time integration
+    - Hyperbolic-parabolic divergence cleaning (Dedner et al. 2002)
+    - Adaptive time stepping based on CFL condition
 
-Features:
-    - JIT-compiled flux computations
-    - Automatic GPU/CPU backend selection
-    - HLL approximate Riemann solver
-    - Second-order Runge-Kutta time integration
-    - Adaptive CFL-based time stepping
-    - Hyperbolic/parabolic divergence cleaning for ∇·B = 0
-
-The divergence cleaning adds a scalar field ψ that advects divergence
-errors at speed c_h and damps them with rate c_h/c_p:
-    ∂B/∂t + ... + ∇ψ = 0
-    ∂ψ/∂t + c_h²∇·B = -(c_h/c_p)² ψ
+The HLL solver is robust for MHD shocks and contact discontinuities,
+though more diffusive than HLLD. It provides excellent stability for
+turbulence simulations and shock-dominated flows.
 
 References:
-    Dedner, A., et al. (2002). Hyperbolic divergence cleaning for the
-        MHD equations. J. Comput. Phys., 175(2), 645-673.
     Harten, A., Lax, P. D., & van Leer, B. (1983). On upstream
         differencing and Godunov-type schemes for hyperbolic
-        conservation laws.
+        conservation laws. SIAM Review, 25(1), 35-61.
+    Dedner, A., et al. (2002). Hyperbolic divergence cleaning for
+        the MHD equations. J. Comput. Phys., 175(2), 645-673.
 """
 
-import os
-from typing import Dict, Any, Optional, List, Tuple
-from functools import partial
-
-import numpy as np
-from tqdm import tqdm
-
-# Configure JAX before import
-def _configure_jax(use_gpu: bool = False):
-    """Configure JAX backend before first use."""
-    if use_gpu:
-        os.environ['JAX_PLATFORM_NAME'] = 'gpu'
-    else:
-        os.environ['JAX_PLATFORM_NAME'] = 'cpu'
-
-# Import JAX
 import jax
 import jax.numpy as jnp
-from jax import jit, lax
-
-from .mhd_system import MHDSystem
-
-
-# ============================================================================
-# DIVERGENCE CLEANING PARAMETERS (Dedner et al. 2002)
-# ============================================================================
-
-# c_r = c_h / c_p ratio (controls damping rate)
-# Higher values = faster damping of divergence errors
-# Dedner et al. recommend c_r ~ 0.18 but more aggressive values work better
-# in practice for finite volume schemes
-C_R = 0.5  # More aggressive than original 0.18
+from jax import jit
+from functools import partial
+from typing import Tuple, Callable, Optional
+import numpy as np
 
 
 # ============================================================================
-# JAX-COMPILED MHD KERNELS WITH DIVERGENCE CLEANING
+# Physical Constants and Numerical Parameters
+# ============================================================================
+
+# Divergence cleaning parameter (c_r = c_h / c_p)
+# Dedner et al. recommend 0.18, but 0.5 provides more aggressive cleaning
+C_R = 0.5
+
+# Numerical floors for positivity preservation
+# More conservative than 1e-10 to prevent near-vacuum instabilities
+DENSITY_FLOOR = 1.0e-6
+PRESSURE_FLOOR = 1.0e-6
+ENERGY_FLOOR = 1.0e-8
+
+
+# ============================================================================
+# Primitive Variable Recovery
 # ============================================================================
 
 @jit
-def _primitive_from_conservative(U: jnp.ndarray, gamma: float) -> Tuple:
+def _get_primitive(U: jnp.ndarray, gamma: float) -> Tuple[jnp.ndarray, ...]:
     """
-    Convert conservative to primitive variables (JIT-compiled).
+    Convert conservative to primitive variables with floors.
     
     Args:
         U: Conservative variables [7, nx, ny]
@@ -77,68 +58,107 @@ def _primitive_from_conservative(U: jnp.ndarray, gamma: float) -> Tuple:
     Returns:
         Tuple of (rho, vx, vy, Bx, By, p, psi)
     """
-    rho = U[0]
+    # Apply density floor
+    rho = jnp.maximum(U[0], DENSITY_FLOOR)
+    
+    # Velocities
     vx = U[1] / rho
     vy = U[2] / rho
+    
+    # Magnetic field
     Bx = U[3]
     By = U[4]
-    psi = U[6]
     
+    # Pressure from energy equation
     kinetic = 0.5 * rho * (vx**2 + vy**2)
     magnetic = 0.5 * (Bx**2 + By**2)
-    p = (gamma - 1) * (U[5] - kinetic - magnetic)
-    p = jnp.maximum(p, 1e-10)
+    internal = U[5] - kinetic - magnetic
+    p = (gamma - 1) * jnp.maximum(internal, ENERGY_FLOOR)
+    p = jnp.maximum(p, PRESSURE_FLOOR)
+    
+    # Divergence cleaning potential
+    psi = U[6]
     
     return rho, vx, vy, Bx, By, p, psi
 
 
+# ============================================================================
+# Wave Speed Computations
+# ============================================================================
+
 @jit
-def _max_wave_speed(U: jnp.ndarray, gamma: float) -> Tuple[float, float, float]:
+def _compute_fast_speed(rho: jnp.ndarray, p: jnp.ndarray, 
+                        Bx: jnp.ndarray, By: jnp.ndarray, 
+                        gamma: float) -> jnp.ndarray:
     """
-    Compute maximum wave speeds for CFL condition.
+    Compute fast magnetosonic speed.
     
-    Returns max(|vx| + cf), max(|vy| + cf), and c_h for divergence cleaning.
+    c_f = sqrt(c_s^2 + v_A^2)
+    
+    where c_s = sqrt(gamma * p / rho) is sound speed
+    and v_A = |B| / sqrt(rho) is Alfvén speed.
     """
-    rho, vx, vy, Bx, By, p, psi = _primitive_from_conservative(U, gamma)
-    
-    # Sound speed
+    # Sound speed squared
     cs2 = gamma * p / rho
     
-    # Alfvén speeds
-    ca2 = (Bx**2 + By**2) / rho
+    # Alfvén speed squared
+    B2 = Bx**2 + By**2
+    va2 = B2 / rho
     
-    # Fast magnetosonic speed (approximate)
-    cf = jnp.sqrt(cs2 + ca2)
+    # Fast magnetosonic speed
+    cf = jnp.sqrt(cs2 + va2)
     
-    sx = jnp.max(jnp.abs(vx) + cf)
-    sy = jnp.max(jnp.abs(vy) + cf)
-    
-    # Divergence cleaning speed (max fast speed)
-    c_h = jnp.maximum(sx, sy)
-    
-    return sx, sy, c_h
+    return cf
 
+
+@jit
+def _compute_max_speed(U: jnp.ndarray, gamma: float) -> float:
+    """
+    Compute maximum characteristic speed for CFL condition.
+    
+    Returns max(|v| + c_f) over the domain.
+    """
+    rho, vx, vy, Bx, By, p, _ = _get_primitive(U, gamma)
+    
+    cf = _compute_fast_speed(rho, p, Bx, By, gamma)
+    
+    # Maximum speed in each direction
+    max_speed_x = jnp.max(jnp.abs(vx) + cf)
+    max_speed_y = jnp.max(jnp.abs(vy) + cf)
+    
+    return jnp.maximum(max_speed_x, max_speed_y)
+
+
+# ============================================================================
+# Flux Functions
+# ============================================================================
 
 @jit
 def _flux_x(U: jnp.ndarray, gamma: float, c_h: float) -> jnp.ndarray:
     """
-    Compute x-direction flux with divergence cleaning (JIT-compiled).
+    Compute x-direction flux with divergence cleaning.
     
-    F = [ρvx, ρvx² + P* - Bx², ρvxvy - BxBy, ψ, Byvx - Bxvy, (E+P*)vx - Bx(v·B), c_h²Bx]
+    F = [ρvx, ρvx² + P* - Bx², ρvxvy - BxBy, ψ, Byvx - Bxvy, 
+         (E + P*)vx - Bx(v·B), ch²Bx]
     
-    The flux for Bx now includes ψ, and there's a flux for ψ proportional to Bx.
+    Note: The Bx flux is ψ (from cleaning) rather than the usual 0.
     """
-    rho, vx, vy, Bx, By, p, psi = _primitive_from_conservative(U, gamma)
-    pt = p + 0.5 * (Bx**2 + By**2)  # Total pressure
+    rho, vx, vy, Bx, By, p, psi = _get_primitive(U, gamma)
+    
+    # Total pressure (thermal + magnetic)
+    pt = p + 0.5 * (Bx**2 + By**2)
+    
+    # v·B
+    vB = vx * Bx + vy * By
     
     F = jnp.zeros_like(U)
-    F = F.at[0].set(rho * vx)
-    F = F.at[1].set(rho * vx**2 + pt - Bx**2)
-    F = F.at[2].set(rho * vx * vy - Bx * By)
-    F = F.at[3].set(psi)  # Divergence cleaning: flux for Bx is ψ
-    F = F.at[4].set(By * vx - Bx * vy)
-    F = F.at[5].set((U[5] + pt) * vx - Bx * (vx * Bx + vy * By))
-    F = F.at[6].set(c_h * c_h * Bx)  # Flux for ψ is c_h² * Bx
+    F = F.at[0].set(rho * vx)                              # Mass flux
+    F = F.at[1].set(rho * vx**2 + pt - Bx**2)             # x-momentum
+    F = F.at[2].set(rho * vx * vy - Bx * By)              # y-momentum
+    F = F.at[3].set(psi)                                   # Bx (cleaning)
+    F = F.at[4].set(By * vx - Bx * vy)                    # By (induction)
+    F = F.at[5].set((U[5] + pt) * vx - Bx * vB)           # Energy
+    F = F.at[6].set(c_h * c_h * Bx)                       # ψ flux
     
     return F
 
@@ -146,62 +166,78 @@ def _flux_x(U: jnp.ndarray, gamma: float, c_h: float) -> jnp.ndarray:
 @jit
 def _flux_y(U: jnp.ndarray, gamma: float, c_h: float) -> jnp.ndarray:
     """
-    Compute y-direction flux with divergence cleaning (JIT-compiled).
+    Compute y-direction flux with divergence cleaning.
     
-    G = [ρvy, ρvxvy - BxBy, ρvy² + P* - By², Bxvy - Byvx, ψ, (E+P*)vy - By(v·B), c_h²By]
-    
-    The flux for By now includes ψ, and there's a flux for ψ proportional to By.
+    G = [ρvy, ρvxvy - BxBy, ρvy² + P* - By², Bxvy - Byvx, ψ,
+         (E + P*)vy - By(v·B), ch²By]
     """
-    rho, vx, vy, Bx, By, p, psi = _primitive_from_conservative(U, gamma)
+    rho, vx, vy, Bx, By, p, psi = _get_primitive(U, gamma)
+    
     pt = p + 0.5 * (Bx**2 + By**2)
+    vB = vx * Bx + vy * By
     
     G = jnp.zeros_like(U)
-    G = G.at[0].set(rho * vy)
-    G = G.at[1].set(rho * vx * vy - Bx * By)
-    G = G.at[2].set(rho * vy**2 + pt - By**2)
-    G = G.at[3].set(Bx * vy - By * vx)
-    G = G.at[4].set(psi)  # Divergence cleaning: flux for By is ψ
-    G = G.at[5].set((U[5] + pt) * vy - By * (vx * Bx + vy * By))
-    G = G.at[6].set(c_h * c_h * By)  # Flux for ψ is c_h² * By
+    G = G.at[0].set(rho * vy)                              # Mass flux
+    G = G.at[1].set(rho * vx * vy - Bx * By)              # x-momentum
+    G = G.at[2].set(rho * vy**2 + pt - By**2)             # y-momentum
+    G = G.at[3].set(Bx * vy - By * vx)                    # Bx (induction)
+    G = G.at[4].set(psi)                                   # By (cleaning)
+    G = G.at[5].set((U[5] + pt) * vy - By * vB)           # Energy
+    G = G.at[6].set(c_h * c_h * By)                       # ψ flux
     
     return G
 
 
+# ============================================================================
+# HLL Riemann Solver
+# ============================================================================
+
 @jit
-def _hll_flux_x(UL: jnp.ndarray, UR: jnp.ndarray, gamma: float, c_h: float) -> jnp.ndarray:
+def _hll_flux_x(UL: jnp.ndarray, UR: jnp.ndarray, 
+               gamma: float, c_h: float) -> jnp.ndarray:
     """
-    HLL approximate Riemann solver for x-direction with divergence cleaning.
+    HLL approximate Riemann solver for x-direction.
     
-    The HLL solver approximates the solution with two waves:
-    F_HLL = (S_R*F_L - S_L*F_R + S_L*S_R*(U_R - U_L)) / (S_R - S_L)
+    The HLL flux is:
+        F^HLL = (S+ F^L - S- F^R + S+ S- (U^R - U^L)) / (S+ - S-)
     
-    Wave speed estimates include the divergence cleaning speed c_h.
+    Wave speeds include the divergence cleaning speed ±c_h.
+    
+    Args:
+        UL: Left state
+        UR: Right state
+        gamma: Adiabatic index
+        c_h: Cleaning wave speed
+    
+    Returns:
+        HLL flux at interface
     """
-    rhoL, vxL, vyL, BxL, ByL, pL, psiL = _primitive_from_conservative(UL, gamma)
-    rhoR, vxR, vyR, BxR, ByR, pR, psiR = _primitive_from_conservative(UR, gamma)
+    # Left state primitives
+    rhoL, vxL, vyL, BxL, ByL, pL, psiL = _get_primitive(UL, gamma)
+    cfL = _compute_fast_speed(rhoL, pL, BxL, ByL, gamma)
     
-    # Fast magnetosonic speeds
-    csL = jnp.sqrt(gamma * pL / rhoL)
-    csR = jnp.sqrt(gamma * pR / rhoR)
-    caL = jnp.sqrt((BxL**2 + ByL**2) / rhoL)
-    caR = jnp.sqrt((BxR**2 + ByR**2) / rhoR)
-    cfL = jnp.sqrt(csL**2 + caL**2)
-    cfR = jnp.sqrt(csR**2 + caR**2)
+    # Right state primitives
+    rhoR, vxR, vyR, BxR, ByR, pR, psiR = _get_primitive(UR, gamma)
+    cfR = _compute_fast_speed(rhoR, pR, BxR, ByR, gamma)
     
-    # Wave speed estimates (include c_h for divergence cleaning)
+    # Wave speed estimates (include cleaning speed)
     SL = jnp.minimum(jnp.minimum(vxL - cfL, vxR - cfR), -c_h)
     SR = jnp.maximum(jnp.maximum(vxL + cfL, vxR + cfR), c_h)
     
-    # Fluxes
+    # Fluxes at left and right states
     FL = _flux_x(UL, gamma, c_h)
     FR = _flux_x(UR, gamma, c_h)
     
-    # HLL flux
+    # HLL flux (vectorized over all components)
+    denom = SR - SL + 1e-10  # Avoid division by zero
+    
     F_hll = jnp.where(
-        SL >= 0, FL,
+        SL >= 0,
+        FL,
         jnp.where(
-            SR <= 0, FR,
-            (SR * FL - SL * FR + SL * SR * (UR - UL)) / (SR - SL + 1e-10)
+            SR <= 0,
+            FR,
+            (SR * FL - SL * FR + SL * SR * (UR - UL)) / denom
         )
     )
     
@@ -209,375 +245,377 @@ def _hll_flux_x(UL: jnp.ndarray, UR: jnp.ndarray, gamma: float, c_h: float) -> j
 
 
 @jit
-def _hll_flux_y(UL: jnp.ndarray, UR: jnp.ndarray, gamma: float, c_h: float) -> jnp.ndarray:
+def _hll_flux_y(UL: jnp.ndarray, UR: jnp.ndarray, 
+               gamma: float, c_h: float) -> jnp.ndarray:
     """
-    HLL approximate Riemann solver for y-direction with divergence cleaning.
+    HLL approximate Riemann solver for y-direction.
     """
-    rhoL, vxL, vyL, BxL, ByL, pL, psiL = _primitive_from_conservative(UL, gamma)
-    rhoR, vxR, vyR, BxR, ByR, pR, psiR = _primitive_from_conservative(UR, gamma)
+    # Left state primitives
+    rhoL, vxL, vyL, BxL, ByL, pL, psiL = _get_primitive(UL, gamma)
+    cfL = _compute_fast_speed(rhoL, pL, BxL, ByL, gamma)
     
-    csL = jnp.sqrt(gamma * pL / rhoL)
-    csR = jnp.sqrt(gamma * pR / rhoR)
-    caL = jnp.sqrt((BxL**2 + ByL**2) / rhoL)
-    caR = jnp.sqrt((BxR**2 + ByR**2) / rhoR)
-    cfL = jnp.sqrt(csL**2 + caL**2)
-    cfR = jnp.sqrt(csR**2 + caR**2)
+    # Right state primitives
+    rhoR, vxR, vyR, BxR, ByR, pR, psiR = _get_primitive(UR, gamma)
+    cfR = _compute_fast_speed(rhoR, pR, BxR, ByR, gamma)
     
-    # Include c_h in wave speed bounds
+    # Wave speed estimates (include cleaning speed)
     SL = jnp.minimum(jnp.minimum(vyL - cfL, vyR - cfR), -c_h)
     SR = jnp.maximum(jnp.maximum(vyL + cfL, vyR + cfR), c_h)
     
+    # Fluxes
     GL = _flux_y(UL, gamma, c_h)
     GR = _flux_y(UR, gamma, c_h)
     
+    # HLL flux
+    denom = SR - SL + 1e-10
+    
     G_hll = jnp.where(
-        SL >= 0, GL,
+        SL >= 0,
+        GL,
         jnp.where(
-            SR <= 0, GR,
-            (SR * GL - SL * GR + SL * SR * (UR - UL)) / (SR - SL + 1e-10)
+            SR <= 0,
+            GR,
+            (SR * GL - SL * GR + SL * SR * (UR - UL)) / denom
         )
     )
     
     return G_hll
 
 
+# ============================================================================
+# Right-Hand Side Computation
+# ============================================================================
+
 @partial(jit, static_argnums=(1, 2))
-def _compute_rhs(U: jnp.ndarray, dx: float, dy: float, gamma: float, c_h: float) -> jnp.ndarray:
+def _compute_rhs(U: jnp.ndarray, dx: float, dy: float, 
+                 gamma: float, c_h: float) -> jnp.ndarray:
     """
-    Compute right-hand side of MHD equations using finite volume method.
+    Compute the right-hand side of the semi-discrete equations.
     
-    dU/dt = -1/dx * (F_{i+1/2} - F_{i-1/2}) - 1/dy * (G_{j+1/2} - G_{j-1/2}) + S
+    dU/dt = -∂F/∂x - ∂G/∂y + S
     
-    where S contains the source term for divergence cleaning damping.
+    where S contains the divergence cleaning source term.
     
-    Divergence cleaning (Dedner et al. 2002):
-        ∂ψ/∂t + c_h²∇·B = -(c_h/c_p)² ψ
-        
-    With c_p = c_h/c_r where c_r = C_R (user parameter), the damping becomes:
-        source_ψ = -c_r² * ψ * c_h / min(dx, dy)
-        
-    This scales properly with grid resolution for effective cleaning.
+    Uses finite volume method with HLL fluxes.
+    
+    Args:
+        U: Conservative variables [7, nx, ny]
+        dx, dy: Grid spacing (static for JIT)
+        gamma: Adiabatic index
+        c_h: Cleaning wave speed
+    
+    Returns:
+        Right-hand side array [7, nx, ny]
     """
-    # X-direction fluxes at cell interfaces
-    UL_x = jnp.roll(U, 1, axis=1)  # U_{i-1}
-    F_minus = _hll_flux_x(UL_x, U, gamma, c_h)  # F_{i-1/2}
-    F_plus = jnp.roll(F_minus, -1, axis=1)  # F_{i+1/2}
+    # Get left and right states for x-direction (periodic BC via roll)
+    UL_x = jnp.roll(U, 1, axis=1)   # U_{i-1,j}
+    UR_x = U                         # U_{i,j}
     
-    # Y-direction fluxes at cell interfaces
-    UL_y = jnp.roll(U, 1, axis=2)  # U_{j-1}
-    G_minus = _hll_flux_y(UL_y, U, gamma, c_h)  # G_{j-1/2}
-    G_plus = jnp.roll(G_minus, -1, axis=2)  # G_{j+1/2}
+    # HLL fluxes at i-1/2 interfaces
+    F_left = _hll_flux_x(UL_x, UR_x, gamma, c_h)
     
-    # Compute RHS from fluxes
-    rhs = -(F_plus - F_minus) / dx - (G_plus - G_minus) / dy
+    # HLL fluxes at i+1/2 interfaces
+    F_right = _hll_flux_x(U, jnp.roll(U, -1, axis=1), gamma, c_h)
     
-    # Add source term for divergence cleaning (parabolic damping)
-    # Following Dedner et al., the damping term is -(c_h/c_p)² ψ
-    # With c_p = c_h/C_R, this becomes -C_R² * ψ
-    # We scale by c_h/min(dx,dy) to ensure proper damping at all resolutions
-    min_dx = min(dx, dy)  # Use Python min since dx, dy are static
+    # Get left and right states for y-direction
+    UL_y = jnp.roll(U, 1, axis=2)   # U_{i,j-1}
+    UR_y = U                         # U_{i,j}
+    
+    # HLL fluxes at j-1/2 interfaces
+    G_left = _hll_flux_y(UL_y, UR_y, gamma, c_h)
+    
+    # HLL fluxes at j+1/2 interfaces
+    G_right = _hll_flux_y(U, jnp.roll(U, -1, axis=2), gamma, c_h)
+    
+    # Flux divergence: -∂F/∂x - ∂G/∂y
+    rhs = -(F_right - F_left) / dx - (G_right - G_left) / dy
+    
+    # Divergence cleaning source term: -c_h²/c_p² ψ = -c_r² c_h / Δx_min * ψ
+    min_dx = min(dx, dy)
     damping_rate = C_R * C_R * c_h / min_dx
     rhs = rhs.at[6].add(-damping_rate * U[6])
     
     return rhs
 
 
+# ============================================================================
+# Time Stepping
+# ============================================================================
+
 @partial(jit, static_argnums=(1, 2))
-def _rk2_step(U: jnp.ndarray, dx: float, dy: float, dt: float, gamma: float, c_h: float) -> jnp.ndarray:
+def _apply_floors(U: jnp.ndarray, dx: float, dy: float, gamma: float) -> jnp.ndarray:
     """
-    Second-order Runge-Kutta (Heun's method) time step with divergence cleaning.
+    Apply positivity-preserving floors to conservative variables.
     
-    k1 = f(U^n)
-    k2 = f(U^n + dt*k1)
-    U^{n+1} = U^n + dt/2 * (k1 + k2)
+    Ensures:
+        - ρ ≥ DENSITY_FLOOR
+        - p ≥ PRESSURE_FLOOR (by adjusting energy)
     """
+    # Apply density floor
+    rho = jnp.maximum(U[0], DENSITY_FLOOR)
+    U = U.at[0].set(rho)
+    
+    # Recompute pressure and apply floor
+    vx = U[1] / rho
+    vy = U[2] / rho
+    Bx = U[3]
+    By = U[4]
+    
+    kinetic = 0.5 * rho * (vx**2 + vy**2)
+    magnetic = 0.5 * (Bx**2 + By**2)
+    internal = U[5] - kinetic - magnetic
+    
+    # If pressure would be negative, fix energy
+    p = (gamma - 1) * internal
+    p_floor = jnp.maximum(p, PRESSURE_FLOOR)
+    
+    # Adjust energy where pressure was floored
+    internal_floor = p_floor / (gamma - 1)
+    E_new = kinetic + magnetic + internal_floor
+    U = U.at[5].set(E_new)
+    
+    return U
+
+
+@partial(jit, static_argnums=(1, 2))
+def _rk2_step(U: jnp.ndarray, dx: float, dy: float, 
+              dt: float, gamma: float, c_h: float) -> jnp.ndarray:
+    """
+    Perform one RK2 (Heun's method) time step.
+    
+    U^{n+1} = U^n + Δt/2 * (k1 + k2)
+    
+    where:
+        k1 = L(U^n)
+        k2 = L(U^n + Δt * k1)
+    
+    This is second-order accurate in time.
+    
+    Args:
+        U: Current state [7, nx, ny]
+        dx, dy: Grid spacing (static)
+        dt: Time step
+        gamma: Adiabatic index
+        c_h: Cleaning wave speed
+    
+    Returns:
+        Updated state after one time step
+    """
+    # Stage 1: Forward Euler predictor
     k1 = _compute_rhs(U, dx, dy, gamma, c_h)
     U_star = U + dt * k1
     
-    # Apply positivity preservation
-    U_star = U_star.at[0].set(jnp.maximum(U_star[0], 1e-10))  # Density floor
+    # Apply floors to intermediate state
+    U_star = _apply_floors(U_star, dx, dy, gamma)
     
+    # Stage 2: Corrector
     k2 = _compute_rhs(U_star, dx, dy, gamma, c_h)
+    
+    # Final update (Heun's method)
     U_new = U + 0.5 * dt * (k1 + k2)
     
-    # Apply floors
-    U_new = U_new.at[0].set(jnp.maximum(U_new[0], 1e-10))  # Density
+    # Apply floors to final state
+    U_new = _apply_floors(U_new, dx, dy, gamma)
     
     return U_new
 
 
 # ============================================================================
-# SOLVER CLASS
+# Main Solver Class
 # ============================================================================
 
-class MHDSolver:
+class MHDIntegrator:
     """
-    JAX-Accelerated Solver for 2D Ideal MHD with Divergence Cleaning.
+    JAX-accelerated MHD integrator with HLL Riemann solver.
     
-    Provides high-performance numerical integration with automatic
-    GPU/CPU backend selection, adaptive time stepping, and comprehensive
-    diagnostics. Uses hyperbolic/parabolic divergence cleaning
-    (Dedner et al. 2002) to maintain ∇·B ≈ 0.
-    
-    Attributes:
-        cfl: CFL number for time step selection
-        use_gpu: Whether GPU acceleration is enabled
-        backend: JAX backend string ('cpu' or 'gpu')
+    Features:
+        - HLL approximate Riemann solver (robust for shocks)
+        - RK2 time integration (second-order accurate)
+        - Dedner divergence cleaning
+        - Adaptive CFL-based time stepping
+        - Positivity-preserving floors
     
     Example:
-        >>> solver = MHDSolver(cfl=0.4, use_gpu=False)
+        >>> from baron_sakender.core.mhd_system import MHDSystem
         >>> system = MHDSystem(nx=256, ny=256)
         >>> system.init_orszag_tang()
-        >>> result = solver.run(system, t_end=3.0, save_dt=0.05)
+        >>> integrator = MHDIntegrator(system, cfl=0.4)
+        >>> t, U = integrator.step()  # Single time step
+        >>> integrator.evolve(t_end=1.0)  # Evolve to t=1.0
+    
+    Attributes:
+        system: MHDSystem instance
+        cfl: CFL number for time stepping
+        gamma: Adiabatic index
+        dx, dy: Grid spacing
+        t: Current simulation time
+        U: Current state array (JAX array)
+        c_h: Current cleaning wave speed
     """
     
-    def __init__(self, cfl: float = 0.4, use_gpu: bool = False):
-        """
-        Initialize solver.
-        
-        Args:
-            cfl: CFL number for stability (default: 0.4)
-            use_gpu: Use GPU acceleration if available (default: False)
-        """
-        self.cfl = cfl
-        self.use_gpu = use_gpu
-        
-        # Configure JAX backend
-        _configure_jax(use_gpu)
-        
-        self.backend = jax.default_backend()
-        self.devices = jax.devices()
-    
-    def run(
+    def __init__(
         self,
-        system: MHDSystem,
-        t_end: float,
-        save_dt: float = 0.05,
-        verbose: bool = True
-    ) -> Dict[str, Any]:
+        system,
+        cfl: float = 0.4,
+        use_gpu: bool = False
+    ):
         """
-        Run MHD simulation.
+        Initialize the integrator.
         
         Args:
             system: MHDSystem instance with initial conditions
-            t_end: End time [τ_A]
-            save_dt: Time interval for saving snapshots
-            verbose: Print progress information
-        
-        Returns:
-            Dictionary with simulation results
+            cfl: CFL number (default 0.4, conservative for HLL)
+            use_gpu: Whether to use GPU acceleration
         """
-        if not system._initialized:
-            raise ValueError("MHD system not initialized. Call init_* method first.")
+        self.system = system
+        self.cfl = cfl
+        self.gamma = system.gamma
+        self.dx = system.dx
+        self.dy = system.dy
         
-        dx = system.dx
-        dy = system.dy
-        gamma = system.gamma
+        # Configure JAX device
+        if use_gpu:
+            try:
+                jax.devices('gpu')
+            except RuntimeError:
+                print("Warning: GPU not available, using CPU")
         
-        # Convert to JAX arrays
-        U = jnp.array(system.U)
+        # Initialize state (convert to JAX array)
+        self.U = jnp.array(system.U)
+        self.t = 0.0
         
-        if verbose:
-            print(f"      Starting simulation to t={t_end:.2f}")
-            print(f"      JAX backend: {self.backend}")
-            print(f"      Divergence cleaning: enabled (c_r={C_R:.2f})")
-            print("      Compiling JAX kernels...")
+        # Initial cleaning speed
+        self.c_h = float(_compute_max_speed(self.U, self.gamma))
         
-        # Warmup JIT compilation
-        sx, sy, c_h = _max_wave_speed(U, gamma)
-        dt_test = min(self.cfl * dx / float(sx), self.cfl * dy / float(sy))
-        _ = _rk2_step(U, dx, dy, dt_test, gamma, float(c_h))
-        jax.block_until_ready(_)
-        
-        if verbose:
-            print("      Running integration...")
-        
-        # Time stepping loop
-        t = 0.0
-        step = 0
-        snapshots = [(0.0, np.array(U))]
-        next_save = save_dt
-        
-        # Estimate total steps for progress bar
-        sx_init, sy_init, c_h_init = _max_wave_speed(U, gamma)
-        dt_est = min(self.cfl * dx / float(sx_init), self.cfl * dy / float(sy_init))
-        total_steps_est = int(t_end / dt_est) + 1
-        
-        pbar = tqdm(
-            total=total_steps_est,
-            desc="      Integrating",
-            disable=not verbose,
-            ncols=70,
-            leave=True
-        )
-        
-        while t < t_end:
-            # Compute time step from CFL condition
-            sx, sy, c_h = _max_wave_speed(U, gamma)
-            dt = min(
-                self.cfl * dx / float(sx),
-                self.cfl * dy / float(sy),
-                t_end - t
-            )
-            
-            # Single RK2 step with divergence cleaning
-            U = _rk2_step(U, dx, dy, dt, gamma, float(c_h))
-            jax.block_until_ready(U)
-            
-            t += dt
-            step += 1
-            pbar.update(1)
-            
-            # Save snapshot
-            if t >= next_save or abs(t - t_end) < 1e-10:
-                snapshots.append((t, np.array(U)))
-                next_save += save_dt
-        
-        pbar.close()
-        
-        if verbose:
-            print(f"      ✓ Simulation complete: {len(snapshots)} snapshots, {step} steps")
-        
-        return {
-            'snapshots': snapshots,
-            'system': system,
-            'params': system.params,
-            't_end': t_end,
-            'total_steps': step,
-            'n_snapshots': len(snapshots),
-            'backend': self.backend,
-        }
+        # Track step count
+        self.step_count = 0
     
-    def run_with_diagnostics(
-        self,
-        system: MHDSystem,
-        t_end: float,
-        save_dt: float = 0.05,
-        verbose: bool = True
-    ) -> Dict[str, Any]:
+    def compute_dt(self) -> float:
         """
-        Run simulation with full diagnostic tracking.
+        Compute time step based on CFL condition.
         
-        This method computes and stores conservation metrics,
-        stability metrics, and turbulence diagnostics at each snapshot.
+        Δt = CFL * min(Δx, Δy) / max(|v| + c_f)
+        """
+        max_speed = float(_compute_max_speed(self.U, self.gamma))
+        max_speed = max(max_speed, 1e-10)  # Avoid division by zero
+        
+        dt = self.cfl * min(self.dx, self.dy) / max_speed
+        
+        return dt
+    
+    def step(self, dt: Optional[float] = None) -> Tuple[float, jnp.ndarray]:
+        """
+        Perform a single time step.
         
         Args:
-            system: MHDSystem instance
-            t_end: End time
-            save_dt: Save interval
-            verbose: Print progress
+            dt: Time step (computed from CFL if None)
         
         Returns:
-            Dictionary with simulation results and diagnostics
+            Tuple of (new_time, new_state)
         """
-        from .metrics import (
-            compute_conservation_metrics,
-            compute_stability_metrics,
-            compute_diagnostics
-        )
+        if dt is None:
+            dt = self.compute_dt()
         
-        if not system._initialized:
-            raise ValueError("MHD system not initialized.")
+        # Update cleaning speed
+        self.c_h = float(_compute_max_speed(self.U, self.gamma))
         
-        dx = system.dx
-        dy = system.dy
-        gamma = system.gamma
+        # RK2 step
+        self.U = _rk2_step(self.U, self.dx, self.dy, dt, self.gamma, self.c_h)
         
-        U = jnp.array(system.U)
+        # Update time
+        self.t += dt
+        self.step_count += 1
         
-        if verbose:
-            print(f"      Starting diagnostic run to t={t_end:.2f}")
-            print(f"      JAX backend: {self.backend}")
-            print(f"      Divergence cleaning: enabled (c_r={C_R:.2f})")
-            print("      Compiling JAX kernels...")
+        return self.t, self.U
+    
+    def evolve(
+        self,
+        t_end: float,
+        callback: Optional[Callable] = None,
+        callback_interval: float = 0.1,
+        max_steps: int = 1000000
+    ) -> Tuple[float, jnp.ndarray]:
+        """
+        Evolve the system to a target time.
         
-        # Warmup
-        sx, sy, c_h = _max_wave_speed(U, gamma)
-        dt_test = min(self.cfl * dx / float(sx), self.cfl * dy / float(sy))
-        _ = _rk2_step(U, dx, dy, dt_test, gamma, float(c_h))
-        jax.block_until_ready(_)
+        Args:
+            t_end: Target final time
+            callback: Optional function called periodically with (t, U)
+            callback_interval: Time interval between callbacks
+            max_steps: Maximum number of steps (safety limit)
         
-        if verbose:
-            print("      Running integration with diagnostics...")
+        Returns:
+            Tuple of (final_time, final_state)
+        """
+        next_callback = self.t + callback_interval
+        steps = 0
         
-        # Storage
-        t = 0.0
-        step = 0
-        snapshots = [(0.0, np.array(U))]
-        next_save = save_dt
-        
-        # Diagnostic time series
-        times = [0.0]
-        conservation_history = []
-        stability_history = []
-        
-        # Initial diagnostics
-        U_np = np.array(U)
-        rho, pmag, Jz, omega = compute_diagnostics(U_np, dx, dy, gamma)
-        
-        cons0 = compute_conservation_metrics(U_np, dx, dy, gamma)
-        conservation_history.append(cons0)
-        
-        stab0 = compute_stability_metrics(U_np, dx, dy, gamma, 0.0, self.cfl)
-        stability_history.append(stab0)
-        
-        # Estimate steps
-        sx_init, sy_init, c_h_init = _max_wave_speed(U, gamma)
-        dt_est = min(self.cfl * dx / float(sx_init), self.cfl * dy / float(sy_init))
-        total_steps_est = int(t_end / dt_est) + 1
-        
-        pbar = tqdm(
-            total=total_steps_est,
-            desc="      Integrating",
-            disable=not verbose,
-            ncols=70
-        )
-        
-        while t < t_end:
-            sx, sy, c_h = _max_wave_speed(U, gamma)
-            dt = min(
-                self.cfl * dx / float(sx),
-                self.cfl * dy / float(sy),
-                t_end - t
-            )
+        while self.t < t_end and steps < max_steps:
+            # Compute dt, potentially reducing to hit t_end exactly
+            dt = self.compute_dt()
+            if self.t + dt > t_end:
+                dt = t_end - self.t
             
-            # RK2 step with divergence cleaning
-            U = _rk2_step(U, dx, dy, dt, gamma, float(c_h))
-            jax.block_until_ready(U)
+            # Take step
+            self.step(dt)
+            steps += 1
             
-            t += dt
-            step += 1
-            pbar.update(1)
-            
-            if t >= next_save or abs(t - t_end) < 1e-10:
-                U_np = np.array(U)
-                snapshots.append((t, U_np))
-                times.append(t)
-                
-                # Conservation metrics
-                cons = compute_conservation_metrics(U_np, dx, dy, gamma)
-                conservation_history.append(cons)
-                
-                # Stability metrics
-                stab = compute_stability_metrics(U_np, dx, dy, gamma, dt, self.cfl)
-                stability_history.append(stab)
-                
-                next_save += save_dt
+            # Callback
+            if callback is not None and self.t >= next_callback:
+                callback(self.t, self.U)
+                next_callback = self.t + callback_interval
         
-        pbar.close()
+        if steps >= max_steps:
+            print(f"Warning: Reached maximum steps ({max_steps})")
         
-        if verbose:
-            print(f"      ✓ Complete: {len(snapshots)} snapshots, {step} steps")
+        return self.t, self.U
+    
+    def get_state(self) -> np.ndarray:
+        """Get current state as NumPy array."""
+        return np.array(self.U)
+    
+    def set_state(self, U: np.ndarray):
+        """Set state from NumPy array."""
+        self.U = jnp.array(U)
+    
+    def get_diagnostics(self) -> dict:
+        """
+        Get current diagnostic quantities.
+        
+        Returns:
+            Dictionary with diagnostic values
+        """
+        U = self.U
+        rho, vx, vy, Bx, By, p, psi = _get_primitive(U, self.gamma)
+        
+        # Compute various diagnostics
+        dV = self.dx * self.dy
         
         return {
-            'snapshots': snapshots,
-            'times': np.array(times),
-            'system': system,
-            'params': system.params,
-            't_end': t_end,
-            'total_steps': step,
-            'n_snapshots': len(snapshots),
-            'backend': self.backend,
-            'conservation_history': conservation_history,
-            'stability_history': stability_history,
+            'time': self.t,
+            'step_count': self.step_count,
+            'dt': self.compute_dt(),
+            'c_h': self.c_h,
+            'total_mass': float(jnp.sum(rho) * dV),
+            'total_energy': float(jnp.sum(U[5]) * dV),
+            'kinetic_energy': float(0.5 * jnp.sum(rho * (vx**2 + vy**2)) * dV),
+            'magnetic_energy': float(0.5 * jnp.sum(Bx**2 + By**2) * dV),
+            'max_div_B': float(jnp.max(jnp.abs(
+                (jnp.roll(Bx, -1, axis=0) - jnp.roll(Bx, 1, axis=0)) / (2*self.dx) +
+                (jnp.roll(By, -1, axis=1) - jnp.roll(By, 1, axis=1)) / (2*self.dy)
+            ))),
+            'min_density': float(jnp.min(rho)),
+            'min_pressure': float(jnp.min(p)),
+            'max_velocity': float(jnp.max(jnp.sqrt(vx**2 + vy**2))),
+            'max_psi': float(jnp.max(jnp.abs(psi))),
         }
+    
+    def __repr__(self) -> str:
+        return (
+            f"MHDIntegrator(t={self.t:.4f}, steps={self.step_count}, "
+            f"cfl={self.cfl}, solver='HLL')"
+        )
+
+
+# Backward compatibility alias
+MHDSolver = MHDIntegrator
