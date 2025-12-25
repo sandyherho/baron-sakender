@@ -21,32 +21,18 @@ from typing import Dict, Any, Optional, List
 
 import numpy as np
 
-# Try to import package modules
-try:
-    from baron_sakender.core.solver import MHDSolver
-    from baron_sakender.core.initial_conditions import get_initial_condition
-    from baron_sakender.core.metrics import (
-        compute_conservation_metrics,
-        compute_stability_metrics,
-        compute_turbulence_metrics,
-        compute_information_metrics,
-        compute_composite_metrics,
-        compute_all_metrics
-    )
-    from baron_sakender.visualization.animator import Animator
-except ImportError:
-    # Fallback for development
-    from core.solver import MHDSolver
-    from core.initial_conditions import get_initial_condition
-    from core.metrics import (
-        compute_conservation_metrics,
-        compute_stability_metrics,
-        compute_turbulence_metrics,
-        compute_information_metrics,
-        compute_composite_metrics,
-        compute_all_metrics
-    )
-    from visualization.animator import Animator
+# Import from actual package structure
+from baron_sakender.core.mhd_system import MHDSystem
+from baron_sakender.core.integrator import MHDIntegrator
+from baron_sakender.core.metrics import (
+    compute_conservation_metrics,
+    compute_stability_metrics,
+    compute_turbulence_metrics,
+    compute_information_metrics,
+    compute_composite_metrics,
+    compute_all_metrics
+)
+from baron_sakender.visualization.animator import Animator
 
 
 # =============================================================================
@@ -266,90 +252,65 @@ def run_simulation(
     logger.info("=" * 70)
     logger.info("")
     
-    # Initialize system
+    # Initialize MHD system
     t_start = time.perf_counter()
     
-    # Grid setup
-    nx, ny = config['nx'], config['ny']
-    Lx, Ly = config['Lx'], config['Ly']
-    x = np.linspace(0, Lx, nx, endpoint=False)
-    y = np.linspace(0, Ly, ny, endpoint=False)
-    dx, dy = x[1] - x[0], y[1] - y[0]
-    
-    # Get initial conditions
-    U0 = get_initial_condition(
-        config['init_type'], 
-        x, y, 
-        gamma=config['gamma']
+    system = MHDSystem(
+        nx=config['nx'],
+        ny=config['ny'],
+        Lx=config['Lx'],
+        Ly=config['Ly'],
+        gamma=config['gamma'],
     )
+    
+    # Initialize based on type
+    if config['init_type'] == 'orszag_tang':
+        system.init_orszag_tang()
+    elif config['init_type'] == 'strong_magnetic':
+        system.init_strong_magnetic(beta=0.1)
+    elif config['init_type'] == 'current_sheet':
+        system.init_current_sheet(width=0.2)
+    elif config['init_type'] == 'alfven_wave':
+        system.init_alfven_wave(amplitude=0.1, k=2)
+    else:
+        raise ValueError(f"Unknown init_type: {config['init_type']}")
     
     timing['system_init'] = time.perf_counter() - t_start
     
-    # Initialize solver
+    # Initialize integrator
     t_start = time.perf_counter()
-    solver = MHDSolver(
-        nx=nx, ny=ny,
-        dx=dx, dy=dy,
-        gamma=config['gamma'],
-        cfl=config['cfl'],
-        use_gpu=use_gpu
-    )
+    integrator = MHDIntegrator(cfl=config['cfl'], use_gpu=use_gpu)
     timing['solver_init'] = time.perf_counter() - t_start
     
-    # Run simulation
-    t_start = time.perf_counter()
-    
-    # Storage for history
-    history = []
-    times = []
-    conservation_history = []
-    stability_history = []
-    
-    U = U0.copy()
-    t = 0.0
-    t_end = config['t_end']
-    save_dt = config['save_dt']
-    next_save = 0.0
+    # Get grid info
+    x, y = system.x, system.y
+    dx, dy = system.dx, system.dy
     
     # Compute initial metrics
-    initial_conservation = compute_conservation_metrics(U, dx, dy, config['gamma'])
+    initial_conservation = compute_conservation_metrics(system.U, dx, dy, config['gamma'])
     
-    while t < t_end:
-        # Get adaptive dt
-        dt = solver.compute_dt(U)
-        
-        # Don't overshoot end time or save time
-        dt = min(dt, t_end - t, next_save - t + 1e-10)
-        
-        # Advance solution
-        U = solver.step(U, dt)
-        t += dt
-        
-        # Save snapshot
-        if t >= next_save - 1e-10:
-            # Compute metrics
-            cons = compute_conservation_metrics(U, dx, dy, config['gamma'])
-            stab = compute_stability_metrics(U, dx, dy, config['gamma'], dt, config['cfl'])
-            
-            history.append({'U': U.copy(), 't': t})
-            times.append(t)
-            conservation_history.append(cons)
-            stability_history.append(stab)
-            
-            next_save += save_dt
-            
-            if verbose:
-                print(f"  t = {t:.3f} / {t_end:.3f}, E_k = {cons['kinetic_energy']:.4f}, "
-                      f"E_m = {cons['magnetic_energy']:.4f}")
+    # Run simulation with diagnostics
+    t_start = time.perf_counter()
+    
+    result = integrator.run_with_diagnostics(
+        system,
+        t_end=config['t_end'],
+        save_dt=config['save_dt'],
+        verbose=verbose
+    )
     
     timing['simulation'] = time.perf_counter() - t_start
+    
+    # Get final state
+    _, U_final = result['snapshots'][-1]
+    t_final = result['times'][-1]
     
     # Compute final metrics
     t_start = time.perf_counter()
     
     final_metrics = compute_all_metrics(
-        U, dx, dy, config['gamma'], 
-        dt=dt, cfl=config['cfl'],
+        U_final, dx, dy, config['gamma'], 
+        dt=0.01, cfl=config['cfl'],
         conservation_initial=initial_conservation
     )
     
@@ -361,38 +322,42 @@ def run_simulation(
     logger.info("=" * 70)
     
     # Conservation metrics
-    cons_metrics = compute_conservation_metrics(U, dx, dy, config['gamma'])
+    cons_metrics = compute_conservation_metrics(U_final, dx, dy, config['gamma'])
     log_metrics(logger, cons_metrics, 'CONSERVATION')
     
     # Stability metrics
-    stab_metrics = compute_stability_metrics(U, dx, dy, config['gamma'], dt, config['cfl'])
+    stab_metrics = compute_stability_metrics(U_final, dx, dy, config['gamma'], dt=0.01, cfl=config['cfl'])
     log_metrics(logger, stab_metrics, 'STABILITY')
     
     # Turbulence metrics
-    turb_metrics = compute_turbulence_metrics(U, dx, dy, config['gamma'])
+    turb_metrics = compute_turbulence_metrics(U_final, dx, dy, config['gamma'])
     log_metrics(logger, turb_metrics, 'TURBULENCE')
     
     # Information metrics
-    info_metrics = compute_information_metrics(U, dx, dy, config['gamma'])
+    info_metrics = compute_information_metrics(U_final, dx, dy, config['gamma'])
     log_metrics(logger, info_metrics, 'INFORMATION METRICS')
     
     # Composite metrics
-    comp_metrics = compute_composite_metrics(U, dx, dy, config['gamma'], initial_conservation)
+    comp_metrics = compute_composite_metrics(U_final, dx, dy, config['gamma'], initial_conservation)
     log_metrics(logger, comp_metrics, 'COMPOSITE METRICS')
     
     logger.info("=" * 70)
     
-    # Create result dictionary
-    result = {
-        'U': U,
+    # Build history list from snapshots
+    history = [{'U': U.copy(), 't': t} for t, U in result['snapshots']]
+    times = list(result['times'])
+    
+    # Create result dictionary for visualization
+    vis_result = {
+        'U': U_final,
         'x': x,
         'y': y,
-        't': t,
+        't': t_final,
         'params': config,
         'history': history,
         'times': times,
-        'conservation_history': conservation_history,
-        'stability_history': stability_history,
+        'conservation_history': result['conservation_history'],
+        'stability_history': result['stability_history'],
         'final_metrics': final_metrics,
     }
     
@@ -403,14 +368,14 @@ def run_simulation(
     
     # Field plot
     png_file = f"{output_dir}/{scenario_name}_fields.png"
-    animator.create_static_plot(result, png_file, config['name'], final_metrics)
+    animator.create_static_plot(vis_result, png_file, config['name'], final_metrics)
     
     # Metrics plot
     metrics_png = f"{output_dir}/{scenario_name}_metrics.png"
     animator.create_metrics_plot(
         np.array(times), 
-        conservation_history, 
-        stability_history,
+        result['conservation_history'], 
+        result['stability_history'],
         metrics_png,
         f"{config['name']} - Diagnostics"
     )
@@ -421,7 +386,7 @@ def run_simulation(
     # Create GIF animation
     t_start = time.perf_counter()
     gif_file = f"{output_dir}/{scenario_name}.gif"
-    animator.create_animation(result, gif_file, config['name'], verbose=verbose)
+    animator.create_animation(vis_result, gif_file, config['name'], verbose=verbose)
     timing['gif_save'] = time.perf_counter() - t_start
     
     # Save data
@@ -433,8 +398,8 @@ def run_simulation(
         nc_file = f"{output_dir}/{scenario_name}.nc"
         with nc.Dataset(nc_file, 'w', format='NETCDF4') as ds:
             # Dimensions
-            ds.createDimension('x', nx)
-            ds.createDimension('y', ny)
+            ds.createDimension('x', config['nx'])
+            ds.createDimension('y', config['ny'])
             ds.createDimension('time', len(history))
             ds.createDimension('var', 7)
             
@@ -464,8 +429,8 @@ def run_simulation(
         all_data = []
         for i, t_val in enumerate(times):
             row = {'time': t_val}
-            row.update(conservation_history[i])
-            row.update(stability_history[i])
+            row.update(result['conservation_history'][i])
+            row.update(result['stability_history'][i])
             all_data.append(row)
         
         df = pd.DataFrame(all_data)
@@ -503,7 +468,7 @@ def run_simulation(
     logger.info(f"Timestamp: {datetime.now().isoformat()}")
     logger.info("=" * 70)
     
-    return result
+    return vis_result
 
 
 # =============================================================================

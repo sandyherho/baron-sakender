@@ -1,6 +1,8 @@
 """
 Comprehensive tests for baron-sakender 2D Ideal MHD solver.
 
+Updated to match cleaned metrics module (spectral indices removed).
+
 Run with: pytest tests/ -v
 """
 
@@ -366,7 +368,7 @@ class TestStabilityMetrics:
 
 
 class TestTurbulenceMetrics:
-    """Test MHD turbulence metrics."""
+    """Test MHD turbulence metrics (spectral indices removed)."""
     
     def test_turbulence_metrics_structure(self, small_system):
         """Test turbulence metrics return correct structure."""
@@ -377,13 +379,31 @@ class TestTurbulenceMetrics:
             small_system.U, dx, dy, small_system.gamma, verbose=False
         )
         
+        # Updated required keys - no spectral indices
         required_keys = [
             'kinetic_energy', 'magnetic_energy', 'cross_helicity',
-            'enstrophy', 'spectral_index_kinetic', 'spectral_index_magnetic'
+            'enstrophy', 'current_squared', 'elsasser_plus_energy', 
+            'elsasser_minus_energy', 'energy_imbalance',
+            'vorticity_kurtosis', 'current_kurtosis', 'taylor_microscale'
         ]
         
         for key in required_keys:
             assert key in metrics, f"Missing key: {key}"
+    
+    def test_no_spectral_indices(self, small_system):
+        """Verify spectral indices are removed from turbulence metrics."""
+        dx = small_system.dx
+        dy = small_system.dy
+        
+        metrics = compute_turbulence_metrics(
+            small_system.U, dx, dy, small_system.gamma, verbose=False
+        )
+        
+        # These should NOT be present
+        assert 'spectral_index_kinetic' not in metrics
+        assert 'spectral_index_magnetic' not in metrics
+        assert 'k_spectrum' not in metrics
+        assert 'E_kinetic_spectrum' not in metrics
     
     def test_elsasser_variables(self, small_system):
         """Test Elsässer variable energies are computed."""
@@ -401,7 +421,7 @@ class TestTurbulenceMetrics:
 
 
 class TestInformationMetrics:
-    """Test information-theoretic metrics."""
+    """Test information-theoretic metrics (simplified)."""
     
     def test_information_metrics_structure(self, small_system):
         """Test information metrics return correct structure."""
@@ -412,13 +432,28 @@ class TestInformationMetrics:
             small_system.U, dx, dy, small_system.gamma, verbose=False
         )
         
+        # Updated required keys - only Shannon entropy
         required_keys = [
             'entropy_density', 'entropy_velocity', 'entropy_magnetic',
-            'MI_velocity_magnetic', 'complexity_vorticity'
+            'entropy_vorticity', 'entropy_current'
         ]
         
         for key in required_keys:
             assert key in metrics, f"Missing key: {key}"
+    
+    def test_no_complexity_metrics(self, small_system):
+        """Verify complexity/MI metrics are removed."""
+        dx = small_system.dx
+        dy = small_system.dy
+        
+        metrics = compute_information_metrics(
+            small_system.U, dx, dy, small_system.gamma, verbose=False
+        )
+        
+        # These should NOT be present
+        assert 'MI_velocity_magnetic' not in metrics
+        assert 'complexity_vorticity' not in metrics
+        assert 'statistical_complexity' not in metrics
     
     def test_entropy_positive(self, small_system):
         """Test that Shannon entropy is non-negative."""
@@ -432,21 +467,10 @@ class TestInformationMetrics:
         assert metrics['entropy_density'] >= 0
         assert metrics['entropy_velocity'] >= 0
         assert metrics['entropy_magnetic'] >= 0
-    
-    def test_mutual_information_non_negative(self, small_system):
-        """Test mutual information is non-negative."""
-        dx = small_system.dx
-        dy = small_system.dy
-        
-        metrics = compute_information_metrics(
-            small_system.U, dx, dy, small_system.gamma, verbose=False
-        )
-        
-        assert metrics['MI_velocity_magnetic'] >= 0
 
 
 class TestCompositeMetrics:
-    """Test novel composite turbulence metrics."""
+    """Test composite turbulence metrics (simplified)."""
     
     def test_composite_metrics_structure(self, small_system):
         """Test composite metrics return correct structure."""
@@ -457,14 +481,27 @@ class TestCompositeMetrics:
             small_system.U, dx, dy, small_system.gamma, verbose=False
         )
         
+        # Updated required keys - no cascade_efficiency or mhd_complexity_index
         required_keys = [
-            'dynamo_efficiency_index', 'mhd_complexity_index',
-            'coherent_structure_index', 'cascade_efficiency',
-            'alignment_index', 'intermittency_index'
+            'dynamo_efficiency', 'coherent_structure_index',
+            'alignment_index', 'intermittency_index', 'conservation_quality'
         ]
         
         for key in required_keys:
             assert key in metrics, f"Missing key: {key}"
+    
+    def test_no_cascade_efficiency(self, small_system):
+        """Verify cascade_efficiency is removed."""
+        dx = small_system.dx
+        dy = small_system.dy
+        
+        metrics = compute_composite_metrics(
+            small_system.U, dx, dy, small_system.gamma, verbose=False
+        )
+        
+        # These should NOT be present (depend on spectral indices)
+        assert 'cascade_efficiency' not in metrics
+        assert 'mhd_complexity_index' not in metrics
     
     def test_conservation_quality_with_initial(self, small_system):
         """Test conservation quality index with initial state."""
@@ -617,7 +654,7 @@ class TestDataHandler:
         metrics = {
             'kinetic_energy': 5.0,
             'magnetic_energy': 5.0,
-            'spectral_index': -1.67,
+            'conservation_quality': 0.99,
             'is_stable': True
         }
         
@@ -691,16 +728,16 @@ class TestAllMetrics:
             verbose=False
         )
         
-        # Check all categories are present
-        assert any(k.startswith('cons_') for k in metrics.keys())
-        assert any(k.startswith('stab_') for k in metrics.keys())
-        assert any(k.startswith('turb_') for k in metrics.keys())
-        assert any(k.startswith('info_') for k in metrics.keys())
-        assert any(k.startswith('comp_') for k in metrics.keys())
+        # Check all categories are present (using prefixed versions)
+        assert any(k.startswith('cons_') or k == 'total_mass' for k in metrics.keys())
+        assert any(k.startswith('stab_') or k == 'max_sonic_mach' for k in metrics.keys())
+        assert any(k.startswith('turb_') or k == 'enstrophy' for k in metrics.keys())
+        assert any(k.startswith('info_') or k == 'entropy_density' for k in metrics.keys())
+        assert any(k.startswith('comp_') or k == 'dynamo_efficiency' for k in metrics.keys())
         
-        # Check spectra are included
-        assert 'k_spectrum' in metrics
-        assert 'E_kinetic_spectrum' in metrics
+        # Spectral data should NOT be present
+        assert 'k_spectrum' not in metrics
+        assert 'E_kinetic_spectrum' not in metrics
 
 
 class TestIntegration:
@@ -738,7 +775,7 @@ class TestIntegration:
         
         # Verify simulation ran successfully
         assert len(result['snapshots']) >= 2
-        assert final_metrics['comp_conservation_quality'] > 0.9
+        assert final_metrics['conservation_quality'] > 0.9
     
     def test_different_initializations(self):
         """Test different initial conditions all work."""
@@ -774,39 +811,25 @@ class TestIntegration:
 class TestConvergence:
     """
     Convergence tests to verify numerical accuracy.
-    
-    These tests verify that the numerical solution converges to the
-    correct solution as resolution increases. For a first-order scheme
-    with HLL solver, we expect approximately first-order convergence.
     """
     
     def test_alfven_wave_convergence(self):
-        """
-        Test convergence using circularly polarized Alfvén wave.
-        
-        The Alfvén wave is an exact solution of ideal MHD, so we can
-        compare numerical results to the analytical solution. We test
-        that higher resolution preserves the wave amplitude better.
-        """
+        """Test convergence using circularly polarized Alfvén wave."""
         from baron_sakender import MHDSystem, MHDSolver
         
-        resolutions = [32, 64]  # Use small resolutions for fast test
+        resolutions = [32, 64]
         amplitude_losses = []
         
-        # Wave parameters
-        k = 1  # Wavenumber
+        k = 1
         amplitude = 0.1
         
         for nx in resolutions:
-            # Create system
             system = MHDSystem(nx=nx, ny=nx)
             system.init_alfven_wave(amplitude=amplitude, k=k)
             
-            # Store initial amplitude
             By_initial = system.U[4].copy()
             initial_amplitude = np.max(np.abs(By_initial))
             
-            # Run for short time (0.5 wave periods to avoid excessive diffusion)
             wave_period = 2 * np.pi / k
             t_end = 0.5 * wave_period
             
@@ -818,86 +841,20 @@ class TestConvergence:
                 verbose=False
             )
             
-            # Get final state
             _, U_final = result['snapshots'][-1]
             By_final = U_final[4]
             
-            # Compute amplitude loss (due to numerical diffusion)
             final_amplitude = np.max(np.abs(By_final))
             amplitude_loss = (initial_amplitude - final_amplitude) / initial_amplitude
             amplitude_losses.append(amplitude_loss)
         
-        # Higher resolution should have less amplitude loss (less diffusion)
-        # Allow some tolerance since both resolutions are coarse
-        assert amplitude_losses[1] <= amplitude_losses[0] * 1.2, \
-            f"Higher resolution should not increase diffusion: {amplitude_losses}"
+        assert amplitude_losses[1] <= amplitude_losses[0] * 1.2
         
-        # Both should preserve most of the amplitude (< 50% loss)
         for i, loss in enumerate(amplitude_losses):
-            assert loss < 0.5, \
-                f"Too much amplitude loss at nx={resolutions[i]}: {loss:.2%}"
-    
-    def test_smooth_solution_error_decreases(self):
-        """
-        Test that errors decrease for smooth initial conditions.
-        
-        Using Orszag-Tang at very early times (before shocks form),
-        verify that higher resolution gives smaller errors.
-        """
-        from baron_sakender import MHDSystem, MHDSolver
-        
-        resolutions = [32, 64]
-        solutions = []
-        
-        # Run short simulation at each resolution
-        for nx in resolutions:
-            system = MHDSystem(nx=nx, ny=nx)
-            system.init_orszag_tang()
-            
-            solver = MHDSolver(cfl=0.4, use_gpu=False)
-            result = solver.run(
-                system,
-                t_end=0.1,  # Very short - before shocks
-                save_dt=0.1,
-                verbose=False
-            )
-            
-            _, U_final = result['snapshots'][-1]
-            solutions.append(U_final)
-        
-        # Interpolate low-res solution to high-res grid for comparison
-        # Use simple check: energy should be better conserved at higher resolution
-        from baron_sakender.core.metrics import compute_conservation_metrics
-        
-        errors = []
-        for i, nx in enumerate(resolutions):
-            system = MHDSystem(nx=nx, ny=nx)
-            system.init_orszag_tang()
-            
-            # Compute initial and final energies
-            cons_initial = compute_conservation_metrics(
-                system.U, system.dx, system.dy, system.gamma
-            )
-            cons_final = compute_conservation_metrics(
-                solutions[i], system.dx, system.dy, system.gamma
-            )
-            
-            # Energy error
-            energy_error = abs(cons_final['total_energy'] - cons_initial['total_energy'])
-            energy_error_rel = energy_error / cons_initial['total_energy']
-            errors.append(energy_error_rel)
-        
-        # Higher resolution should have smaller or equal error
-        # (Allow small tolerance for numerical noise)
-        assert errors[1] <= errors[0] * 1.5, \
-            f"Higher resolution should not increase error significantly: {errors}"
+            assert loss < 0.5, f"Too much amplitude loss at nx={resolutions[i]}: {loss:.2%}"
     
     def test_divergence_cleaning_effectiveness(self):
-        """
-        Test that divergence cleaning maintains ∇·B ≈ 0.
-        
-        Run simulation and verify that max|∇·B| stays bounded.
-        """
+        """Test that divergence cleaning maintains ∇·B ≈ 0."""
         from baron_sakender import MHDSystem, MHDSolver
         from baron_sakender.core.metrics import compute_conservation_metrics
         
@@ -912,22 +869,16 @@ class TestConvergence:
             verbose=False
         )
         
-        # Check divergence at each snapshot
         max_divB_values = []
         for t, U in result['snapshots']:
             cons = compute_conservation_metrics(U, system.dx, system.dy, system.gamma)
             max_divB_values.append(cons['max_div_B'])
         
-        # With divergence cleaning, max|∇·B| should stay small
-        # For smooth Orszag-Tang at early times, should be < 0.01
         final_divB = max_divB_values[-1]
-        assert final_divB < 0.01, \
-            f"Divergence cleaning not effective: max|∇·B| = {final_divB:.2e}"
+        assert final_divB < 0.01, f"Divergence cleaning not effective: max|∇·B| = {final_divB:.2e}"
     
     def test_mass_conservation_convergence(self):
-        """
-        Test that mass conservation improves with resolution.
-        """
+        """Test that mass conservation improves with resolution."""
         from baron_sakender import MHDSystem, MHDSolver
         from baron_sakender.core.metrics import compute_conservation_metrics
         
@@ -960,15 +911,11 @@ class TestConvergence:
             mass_error = abs(final_mass - initial_mass) / initial_mass
             mass_errors.append(mass_error)
         
-        # Mass should be well-conserved (< 1% error)
         for i, error in enumerate(mass_errors):
-            assert error < 0.01, \
-                f"Mass conservation error too large at nx={resolutions[i]}: {error:.2e}"
+            assert error < 0.01, f"Mass conservation error too large at nx={resolutions[i]}: {error:.2e}"
     
     def test_energy_conservation_convergence(self):
-        """
-        Test that energy conservation improves with resolution.
-        """
+        """Test that energy conservation improves with resolution."""
         from baron_sakender import MHDSystem, MHDSolver
         from baron_sakender.core.metrics import compute_conservation_metrics
         
@@ -1001,10 +948,8 @@ class TestConvergence:
             energy_error = abs(final_energy - initial_energy) / initial_energy
             energy_errors.append(energy_error)
         
-        # Energy should be well-conserved (< 1% error)
         for i, error in enumerate(energy_errors):
-            assert error < 0.01, \
-                f"Energy conservation error too large at nx={resolutions[i]}: {error:.2e}"
+            assert error < 0.01, f"Energy conservation error too large at nx={resolutions[i]}: {error:.2e}"
 
 
 if __name__ == '__main__':

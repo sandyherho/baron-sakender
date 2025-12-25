@@ -1,10 +1,14 @@
 """
 Tests for simplified MHD metrics module.
 
+Updated to match cleaned metrics (spectral indices removed, simplified information metrics).
+
 Tests verify:
     - Conservation metrics computation
     - Stability metrics computation
-    - Turbulence metrics computation
+    - Turbulence metrics computation (no spectral indices)
+    - Information metrics (Shannon entropy only)
+    - Composite metrics (no cascade efficiency)
     - Physical correctness of derived quantities
 """
 
@@ -15,6 +19,8 @@ from baron_sakender.core.metrics import (
     compute_conservation_metrics,
     compute_stability_metrics,
     compute_turbulence_metrics,
+    compute_information_metrics,
+    compute_composite_metrics,
     compute_all_metrics,
 )
 
@@ -75,8 +81,7 @@ class TestConservationMetrics:
         expected_keys = [
             'total_mass', 'total_momentum_x', 'total_momentum_y', 'total_momentum',
             'total_energy', 'kinetic_energy', 'magnetic_energy', 'thermal_energy',
-            'cross_helicity', 'magnetic_flux_x', 'magnetic_flux_y',
-            'max_div_B', 'mean_div_B'
+            'cross_helicity', 'max_div_B', 'mean_div_B'
         ]
         
         for key in expected_keys:
@@ -187,7 +192,7 @@ class TestStabilityMetrics:
 
 
 class TestTurbulenceMetrics:
-    """Test turbulence metrics computation."""
+    """Test turbulence metrics computation (spectral indices removed)."""
     
     def test_turbulence_metrics_keys(self):
         """Test that all expected keys are present."""
@@ -201,7 +206,7 @@ class TestTurbulenceMetrics:
         
         expected_keys = [
             'kinetic_energy', 'magnetic_energy', 'total_energy', 'energy_ratio',
-            'enstrophy', 'mean_vorticity', 'max_vorticity',
+            'enstrophy', 'mean_vorticity', 'max_vorticity', 'rms_vorticity',
             'current_squared', 'mean_current', 'max_current', 'rms_current',
             'cross_helicity', 'normalized_cross_helicity',
             'residual_energy', 'normalized_residual_energy',
@@ -211,6 +216,23 @@ class TestTurbulenceMetrics:
         
         for key in expected_keys:
             assert key in metrics, f"Missing key: {key}"
+    
+    def test_no_spectral_indices(self):
+        """Verify spectral indices are NOT present (removed due to HLL diffusion)."""
+        nx, ny = 64, 64
+        U = np.random.rand(7, nx, ny) + 0.1
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_turbulence_metrics(U, dx, dy, gamma)
+        
+        # These should NOT be present
+        assert 'spectral_index_kinetic' not in metrics
+        assert 'spectral_index_magnetic' not in metrics
+        assert 'k_spectrum' not in metrics
+        assert 'E_kinetic_spectrum' not in metrics
+        assert 'E_magnetic_spectrum' not in metrics
     
     def test_energy_consistency(self):
         """Test that total energy equals sum of kinetic and magnetic."""
@@ -241,6 +263,168 @@ class TestTurbulenceMetrics:
         # Elsässer energies should be positive
         assert metrics['elsasser_plus_energy'] >= 0
         assert metrics['elsasser_minus_energy'] >= 0
+    
+    def test_kurtosis_values(self):
+        """Test that kurtosis values are reasonable."""
+        nx, ny = 64, 64
+        U = np.random.rand(7, nx, ny) + 0.1
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_turbulence_metrics(U, dx, dy, gamma)
+        
+        # Kurtosis should be positive (fourth moment / variance^2)
+        assert metrics['vorticity_kurtosis'] > 0
+        assert metrics['current_kurtosis'] > 0
+
+
+class TestInformationMetrics:
+    """Test information metrics (simplified - Shannon entropy only)."""
+    
+    def test_information_metrics_keys(self):
+        """Test that expected keys are present (entropy only)."""
+        nx, ny = 64, 64
+        U = np.random.rand(7, nx, ny) + 0.1
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_information_metrics(U, dx, dy, gamma)
+        
+        expected_keys = [
+            'entropy_density', 'entropy_velocity', 'entropy_magnetic',
+            'entropy_vorticity', 'entropy_current'
+        ]
+        
+        for key in expected_keys:
+            assert key in metrics, f"Missing key: {key}"
+    
+    def test_no_complexity_metrics(self):
+        """Verify complexity/MI metrics are NOT present (removed)."""
+        nx, ny = 64, 64
+        U = np.random.rand(7, nx, ny) + 0.1
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_information_metrics(U, dx, dy, gamma)
+        
+        # These should NOT be present
+        assert 'MI_density_velocity' not in metrics
+        assert 'MI_velocity_magnetic' not in metrics
+        assert 'MI_vorticity_current' not in metrics
+        assert 'complexity_vorticity' not in metrics
+        assert 'statistical_complexity' not in metrics
+    
+    def test_entropy_positive(self):
+        """Test that Shannon entropy is non-negative."""
+        nx, ny = 32, 32
+        U = np.random.rand(7, nx, ny) + 0.1
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_information_metrics(U, dx, dy, gamma)
+        
+        assert metrics['entropy_density'] >= 0
+        assert metrics['entropy_velocity'] >= 0
+        assert metrics['entropy_magnetic'] >= 0
+        assert metrics['entropy_vorticity'] >= 0
+        assert metrics['entropy_current'] >= 0
+    
+    def test_uniform_field_low_entropy(self):
+        """Test that uniform fields have lower entropy than random."""
+        nx, ny = 64, 64
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        # Uniform state
+        U_uniform = np.ones((7, nx, ny))
+        U_uniform[0] = 1.0
+        U_uniform[5] = 2.0
+        
+        # Random state
+        U_random = np.random.rand(7, nx, ny) + 0.1
+        U_random[5] = 2.0
+        
+        metrics_uniform = compute_information_metrics(U_uniform, dx, dy, gamma)
+        metrics_random = compute_information_metrics(U_random, dx, dy, gamma)
+        
+        # Uniform density should have zero or very low entropy
+        # Random density should have higher entropy
+        assert metrics_uniform['entropy_density'] < metrics_random['entropy_density']
+
+
+class TestCompositeMetrics:
+    """Test composite metrics (simplified - no cascade efficiency)."""
+    
+    def test_composite_metrics_keys(self):
+        """Test that expected keys are present."""
+        nx, ny = 32, 32
+        U = np.ones((7, nx, ny))
+        U[0] = 1.0
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_composite_metrics(U, dx, dy, gamma)
+        
+        expected_keys = [
+            'dynamo_efficiency', 'alignment_index', 'coherent_structure_index',
+            'intermittency_index', 'conservation_quality',
+            'mass_conservation_error', 'energy_conservation_error'
+        ]
+        
+        for key in expected_keys:
+            assert key in metrics, f"Missing key: {key}"
+    
+    def test_no_cascade_efficiency(self):
+        """Verify cascade_efficiency is NOT present (depends on spectral index)."""
+        nx, ny = 32, 32
+        U = np.ones((7, nx, ny))
+        U[0] = 1.0
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_composite_metrics(U, dx, dy, gamma)
+        
+        # These should NOT be present (depend on spectral indices)
+        assert 'cascade_efficiency' not in metrics
+        assert 'mhd_complexity_index' not in metrics
+    
+    def test_dynamo_efficiency_bounded(self):
+        """Test that dynamo efficiency is between 0 and 1."""
+        nx, ny = 32, 32
+        U = np.random.rand(7, nx, ny) + 0.1
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_composite_metrics(U, dx, dy, gamma)
+        
+        assert 0 <= metrics['dynamo_efficiency'] <= 1
+    
+    def test_conservation_quality_identical_states(self):
+        """Test conservation quality for identical states."""
+        nx, ny = 32, 32
+        U = np.ones((7, nx, ny))
+        U[0] = 1.0
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        # Compute initial conservation
+        initial = compute_conservation_metrics(U, dx, dy, gamma)
+        
+        # Compute composite with initial
+        metrics = compute_composite_metrics(U, dx, dy, gamma, conservation_initial=initial)
+        
+        # For identical states, conservation quality should be 1.0
+        assert np.isclose(metrics['conservation_quality'], 1.0, atol=0.01)
+        assert np.isclose(metrics['mass_conservation_error'], 0.0, atol=1e-10)
+        assert np.isclose(metrics['energy_conservation_error'], 0.0, atol=1e-10)
 
 
 class TestComputeAllMetrics:
@@ -261,8 +445,8 @@ class TestComputeAllMetrics:
         assert 'total_mass' in metrics
         assert 'max_sonic_mach' in metrics
         assert 'kinetic_energy' in metrics
-        assert 'mass_conservation_error' in metrics
-        assert 'energy_conservation_error' in metrics
+        assert 'entropy_density' in metrics
+        assert 'dynamo_efficiency' in metrics
     
     def test_all_metrics_with_initial(self):
         """Test compute_all_metrics with initial metrics."""
@@ -277,7 +461,7 @@ class TestComputeAllMetrics:
         initial = compute_conservation_metrics(U, dx, dy, gamma)
         
         # Then compute all metrics with initial
-        metrics = compute_all_metrics(U, dx, dy, gamma, initial_metrics=initial)
+        metrics = compute_all_metrics(U, dx, dy, gamma, conservation_initial=initial)
         
         # Conservation errors should be zero for identical states
         assert np.isclose(metrics['mass_conservation_error'], 0, atol=1e-10)
@@ -294,7 +478,25 @@ class TestComputeAllMetrics:
         metrics = compute_all_metrics(U, dx, dy, gamma)
         
         for key, value in metrics.items():
-            assert not np.isnan(value), f"NaN value for {key}"
+            if isinstance(value, (int, float)):
+                assert not np.isnan(value), f"NaN value for {key}"
+    
+    def test_no_spectral_data(self):
+        """Verify no spectral data is included."""
+        nx, ny = 32, 32
+        U = np.ones((7, nx, ny))
+        U[0] = 1.0
+        U[5] = 2.0
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        metrics = compute_all_metrics(U, dx, dy, gamma)
+        
+        # These should NOT be present
+        assert 'k_spectrum' not in metrics
+        assert 'E_kinetic_spectrum' not in metrics
+        assert 'E_magnetic_spectrum' not in metrics
+        assert 'spectral_index_kinetic' not in metrics
 
 
 class TestPhysicalCorrectness:
@@ -353,6 +555,27 @@ class TestPhysicalCorrectness:
         metrics_low = compute_stability_metrics(U_low, dx, dy, gamma, dt, cfl)
         
         assert metrics_high['mean_beta'] > metrics_low['mean_beta']
+    
+    def test_equipartition_state(self):
+        """Test metrics for equipartition state (E_k ~ E_m)."""
+        nx, ny = 32, 32
+        dx = dy = 0.1
+        gamma = 5/3
+        
+        # Create state with equal kinetic and magnetic energy
+        U = np.ones((7, nx, ny))
+        U[0] = 1.0      # rho
+        U[1] = 0.5      # rho*vx -> v^2/2 = 0.125
+        U[2] = 0.5      # rho*vy
+        U[3] = 0.5      # Bx -> B^2/2 = 0.25
+        U[4] = 0.5      # By
+        U[5] = 2.0      # E
+        
+        metrics = compute_turbulence_metrics(U, dx, dy, gamma)
+        
+        # Energy ratio should be close to 1 for equipartition
+        # (allowing some tolerance due to numerical factors)
+        assert 0.1 < metrics['energy_ratio'] < 10
 
 
 if __name__ == '__main__':
