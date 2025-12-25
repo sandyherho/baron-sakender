@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 import numpy as np
+from tqdm import tqdm
 
 # Import from actual package structure
 from baron_sakender.core.mhd_system import MHDSystem
@@ -292,14 +293,20 @@ def run_simulation(
     # Run simulation with diagnostics
     t_start = time.perf_counter()
     
+    print(f"\n{'='*60}")
+    print(f"  Running: {config['name']}")
+    print(f"  Grid: {config['nx']}x{config['ny']}, t_end: {config['t_end']}")
+    print(f"{'='*60}\n")
+    
     result = integrator.run_with_diagnostics(
         system,
         t_end=config['t_end'],
         save_dt=config['save_dt'],
-        verbose=verbose
+        verbose=True  # Enable tqdm progress bar
     )
     
     timing['simulation'] = time.perf_counter() - t_start
+    print()  # Clean line after tqdm
     
     # Get final state
     _, U_final = result['snapshots'][-1]
@@ -361,84 +368,85 @@ def run_simulation(
         'final_metrics': final_metrics,
     }
     
-    # Generate visualizations
-    t_start = time.perf_counter()
+    # Post-processing with progress bar
+    post_steps = [
+        ('Creating field plot', 'png'),
+        ('Creating metrics plot', 'metrics_png'),
+        ('Creating animation', 'gif'),
+        ('Saving NetCDF', 'netcdf'),
+        ('Saving CSV', 'csv'),
+    ]
     
-    animator = Animator(fps=10, dpi=150)
+    pbar = tqdm(post_steps, desc="Post-processing", unit="step", leave=True)
     
-    # Field plot
-    png_file = f"{output_dir}/{scenario_name}_fields.png"
-    animator.create_static_plot(vis_result, png_file, config['name'], final_metrics)
-    
-    # Metrics plot
-    metrics_png = f"{output_dir}/{scenario_name}_metrics.png"
-    animator.create_metrics_plot(
-        np.array(times), 
-        result['conservation_history'], 
-        result['stability_history'],
-        metrics_png,
-        f"{config['name']} - Diagnostics"
-    )
-    
-    timing['png_save'] = time.perf_counter() - t_start
-    timing['visualization'] = timing['png_save']
-    
-    # Create GIF animation
-    t_start = time.perf_counter()
-    gif_file = f"{output_dir}/{scenario_name}.gif"
-    animator.create_animation(vis_result, gif_file, config['name'], verbose=verbose)
-    timing['gif_save'] = time.perf_counter() - t_start
-    
-    # Save data
-    t_start = time.perf_counter()
-    
-    # Save to NetCDF
-    try:
-        import netCDF4 as nc
-        nc_file = f"{output_dir}/{scenario_name}.nc"
-        with nc.Dataset(nc_file, 'w', format='NETCDF4') as ds:
-            # Dimensions
-            ds.createDimension('x', config['nx'])
-            ds.createDimension('y', config['ny'])
-            ds.createDimension('time', len(history))
-            ds.createDimension('var', 7)
-            
-            # Coordinates
-            ds.createVariable('x', 'f8', ('x',))[:] = x
-            ds.createVariable('y', 'f8', ('y',))[:] = y
-            ds.createVariable('time', 'f8', ('time',))[:] = times
-            
-            # Data
-            U_all = np.array([h['U'] for h in history])
-            ds.createVariable('U', 'f8', ('time', 'var', 'x', 'y'))[:] = U_all
-            
-            # Attributes
-            ds.scenario = config['name']
-            ds.gamma = config['gamma']
-            ds.cfl = config['cfl']
-        timing['netcdf_save'] = time.perf_counter() - t_start
-    except ImportError:
-        timing['netcdf_save'] = 0.0
-    
-    # Save metrics to CSV
-    t_start = time.perf_counter()
-    try:
-        import pandas as pd
+    for step_name, step_key in pbar:
+        pbar.set_description(f"  {step_name}")
         
-        # Combine all metrics into dataframe
-        all_data = []
-        for i, t_val in enumerate(times):
-            row = {'time': t_val}
-            row.update(result['conservation_history'][i])
-            row.update(result['stability_history'][i])
-            all_data.append(row)
-        
-        df = pd.DataFrame(all_data)
-        csv_file = f"{output_dir}/{scenario_name}_metrics.csv"
-        df.to_csv(csv_file, index=False)
-        timing['csv_save'] = time.perf_counter() - t_start
-    except ImportError:
-        timing['csv_save'] = 0.0
+        if step_key == 'png':
+            t_start = time.perf_counter()
+            animator = Animator(fps=10, dpi=150)
+            png_file = f"{output_dir}/{scenario_name}_fields.png"
+            animator.create_static_plot(vis_result, png_file, config['name'], final_metrics)
+            timing['png_save'] = time.perf_counter() - t_start
+            
+        elif step_key == 'metrics_png':
+            t_start = time.perf_counter()
+            metrics_png = f"{output_dir}/{scenario_name}_metrics.png"
+            animator.create_metrics_plot(
+                np.array(times), 
+                result['conservation_history'], 
+                result['stability_history'],
+                metrics_png,
+                f"{config['name']} - Diagnostics"
+            )
+            timing['visualization'] = time.perf_counter() - t_start
+            
+        elif step_key == 'gif':
+            t_start = time.perf_counter()
+            gif_file = f"{output_dir}/{scenario_name}.gif"
+            animator.create_animation(vis_result, gif_file, config['name'], verbose=False)
+            timing['gif_save'] = time.perf_counter() - t_start
+            
+        elif step_key == 'netcdf':
+            t_start = time.perf_counter()
+            try:
+                import netCDF4 as nc
+                nc_file = f"{output_dir}/{scenario_name}.nc"
+                with nc.Dataset(nc_file, 'w', format='NETCDF4') as ds:
+                    ds.createDimension('x', config['nx'])
+                    ds.createDimension('y', config['ny'])
+                    ds.createDimension('time', len(history))
+                    ds.createDimension('var', 7)
+                    ds.createVariable('x', 'f8', ('x',))[:] = x
+                    ds.createVariable('y', 'f8', ('y',))[:] = y
+                    ds.createVariable('time', 'f8', ('time',))[:] = times
+                    U_all = np.array([h['U'] for h in history])
+                    ds.createVariable('U', 'f8', ('time', 'var', 'x', 'y'))[:] = U_all
+                    ds.scenario = config['name']
+                    ds.gamma = config['gamma']
+                    ds.cfl = config['cfl']
+                timing['netcdf_save'] = time.perf_counter() - t_start
+            except ImportError:
+                timing['netcdf_save'] = 0.0
+                
+        elif step_key == 'csv':
+            t_start = time.perf_counter()
+            try:
+                import pandas as pd
+                all_data = []
+                for i, t_val in enumerate(times):
+                    row = {'time': t_val}
+                    row.update(result['conservation_history'][i])
+                    row.update(result['stability_history'][i])
+                    all_data.append(row)
+                df = pd.DataFrame(all_data)
+                csv_file = f"{output_dir}/{scenario_name}_metrics.csv"
+                df.to_csv(csv_file, index=False)
+                timing['csv_save'] = time.perf_counter() - t_start
+            except ImportError:
+                timing['csv_save'] = 0.0
+    
+    print()  # Clean line after progress bar
     
     # Log timing
     logger.info("=" * 70)
@@ -467,6 +475,25 @@ def run_simulation(
     logger.info(f"Simulation completed: {scenario_name}")
     logger.info(f"Timestamp: {datetime.now().isoformat()}")
     logger.info("=" * 70)
+    
+    # Print clean summary to console
+    total_time = sum(timing.values())
+    print(f"\n{'='*60}")
+    print(f"  SIMULATION COMPLETE")
+    print(f"{'='*60}")
+    print(f"  Total time: {total_time:.1f}s")
+    print(f"  Mass conservation error: {comp_metrics.get('mass_conservation_error', 0)*100:.4f}%")
+    print(f"  Energy conservation error: {comp_metrics.get('energy_conservation_error', 0)*100:.4f}%")
+    print(f"  Max |∇·B|: {cons_metrics.get('max_div_B', 0):.2e}")
+    print(f"{'='*60}")
+    print(f"  Output files:")
+    print(f"    • {output_dir}/{scenario_name}_fields.png")
+    print(f"    • {output_dir}/{scenario_name}_metrics.png")
+    print(f"    • {output_dir}/{scenario_name}.gif")
+    print(f"    • {output_dir}/{scenario_name}.nc")
+    print(f"    • {output_dir}/{scenario_name}_metrics.csv")
+    print(f"    • logs/{scenario_name}.log")
+    print(f"{'='*60}\n")
     
     return vis_result
 
@@ -530,9 +557,10 @@ Available scenarios:
             verbose=args.verbose,
             use_gpu=args.gpu
         )
-        print(f"\nSimulation completed successfully!")
-        print(f"Outputs saved to: {args.output}/")
         return 0
+    except KeyboardInterrupt:
+        print("\n\nSimulation interrupted by user.")
+        return 1
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         if args.verbose:
