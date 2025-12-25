@@ -71,9 +71,6 @@ baron-sakender = "baron_sakender.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/sandyherho/baron-sakender"
-Documentation = "https://baron-sakender.readthedocs.io"
-Repository = "https://github.com/sandyherho/baron-sakender"
-Issues = "https://github.com/sandyherho/baron-sakender/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
