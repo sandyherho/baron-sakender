@@ -1,14 +1,13 @@
 """
 Tests for simplified MHD metrics module.
 
-Updated to match cleaned metrics (spectral indices removed, simplified information metrics).
 
 Tests verify:
     - Conservation metrics computation
     - Stability metrics computation
-    - Turbulence metrics computation (no spectral indices)
-    - Information metrics (Shannon entropy only)
-    - Composite metrics (no cascade efficiency)
+    - Turbulence metrics computation 
+    - Information metrics 
+    - Composite metrics
     - Physical correctness of derived quantities
 """
 
