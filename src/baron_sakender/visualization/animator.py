@@ -57,6 +57,122 @@ def setup_dark_figure(
     return fig, axes
 
 
+class Animator:
+    """
+    Animator class for MHD simulation visualization.
+    
+    Provides methods to create static plots, diagnostic plots, and animations.
+    
+    Attributes:
+        fps: Frames per second for animations
+        dpi: Resolution for saved images
+    """
+    
+    def __init__(self, fps: int = 20, dpi: int = 150):
+        """
+        Initialize the Animator.
+        
+        Args:
+            fps: Frames per second for animations
+            dpi: Resolution for saved images
+        """
+        self.fps = fps
+        self.dpi = dpi
+    
+    def create_static_plot(
+        self,
+        result: Dict[str, Any],
+        save_path: Path,
+        title: str = "MHD Fields",
+        metrics: Optional[Dict[str, float]] = None
+    ) -> plt.Figure:
+        """
+        Create static plot of final simulation state.
+        
+        Args:
+            result: Simulation result dictionary
+            save_path: Path to save figure
+            title: Plot title
+            metrics: Optional metrics to display
+        
+        Returns:
+            matplotlib Figure
+        """
+        # Get final state
+        t_final, U = result['snapshots'][-1]
+        system = result['system']
+        dx = system.dx
+        dy = system.dy
+        gamma = system.gamma
+        
+        return plot_fields(U, dx, dy, gamma, t_final, title, save_path, self.dpi)
+    
+    def create_metrics_plot(
+        self,
+        times: np.ndarray,
+        conservation_history: List[Dict[str, float]],
+        stability_history: List[Dict[str, float]],
+        save_path: Path,
+        title: str = "Diagnostics"
+    ) -> plt.Figure:
+        """
+        Create diagnostic time series plot.
+        
+        Args:
+            times: Time array
+            conservation_history: List of conservation metrics
+            stability_history: List of stability metrics
+            save_path: Path to save figure
+            title: Plot title
+        
+        Returns:
+            matplotlib Figure
+        """
+        # Combine histories
+        metrics_history = []
+        for cons, stab in zip(conservation_history, stability_history):
+            combined = {}
+            combined.update(cons)
+            combined.update(stab)
+            metrics_history.append(combined)
+        
+        return plot_diagnostics(times, metrics_history, title, save_path, self.dpi)
+    
+    def create_animation(
+        self,
+        result: Dict[str, Any],
+        save_path: Path,
+        title: str = "MHD Simulation",
+        verbose: bool = True
+    ) -> Optional[animation.FuncAnimation]:
+        """
+        Create animated GIF of simulation evolution.
+        
+        Args:
+            result: Simulation result dictionary
+            save_path: Path to save GIF
+            title: Animation title
+            verbose: Print progress
+        
+        Returns:
+            matplotlib Animation object or None if save_path provided
+        """
+        system = result['system']
+        dx = system.dx
+        dy = system.dy
+        gamma = system.gamma
+        
+        states = [U for t, U in result['snapshots']]
+        times = np.array([t for t, U in result['snapshots']])
+        
+        if verbose:
+            print(f"      Creating animation with {len(states)} frames...")
+        
+        return create_animation_impl(
+            states, times, dx, dy, gamma, title, save_path, self.fps
+        )
+
+
 def plot_fields(
     U: np.ndarray,
     dx: float,
@@ -64,7 +180,8 @@ def plot_fields(
     gamma: float,
     t: float,
     title: str = "MHD Fields",
-    save_path: Optional[Path] = None
+    save_path: Optional[Path] = None,
+    dpi: int = 150
 ) -> plt.Figure:
     """
     Plot 2D field snapshots: density, magnetic pressure, current, vorticity.
@@ -76,6 +193,7 @@ def plot_fields(
         t: Current time
         title: Plot title
         save_path: Path to save figure
+        dpi: Resolution
     
     Returns:
         matplotlib Figure
@@ -143,8 +261,9 @@ def plot_fields(
     plt.tight_layout()
     
     if save_path:
-        fig.savefig(save_path, dpi=150, facecolor=fig.get_facecolor(), 
+        fig.savefig(save_path, dpi=dpi, facecolor=fig.get_facecolor(), 
                     edgecolor='none', bbox_inches='tight')
+        plt.close(fig)
     
     return fig
 
@@ -153,7 +272,8 @@ def plot_diagnostics(
     times: np.ndarray,
     metrics_history: List[Dict[str, float]],
     title: str = "Diagnostics",
-    save_path: Optional[Path] = None
+    save_path: Optional[Path] = None,
+    dpi: int = 150
 ) -> plt.Figure:
     """
     Plot diagnostic time series with simplified metrics.
@@ -163,6 +283,7 @@ def plot_diagnostics(
         metrics_history: List of metrics dictionaries
         title: Plot title
         save_path: Path to save figure
+        dpi: Resolution
     
     Returns:
         matplotlib Figure
@@ -245,17 +366,18 @@ def plot_diagnostics(
     ax.set_title('Cross Helicity Evolution')
     ax.grid(True, alpha=0.3)
     
-    fig.suptitle(f'{title} - Diagnostics', fontsize=14, color='white')
+    fig.suptitle(title, fontsize=14, color='white')
     plt.tight_layout()
     
     if save_path:
-        fig.savefig(save_path, dpi=150, facecolor=fig.get_facecolor(),
+        fig.savefig(save_path, dpi=dpi, facecolor=fig.get_facecolor(),
                     edgecolor='none', bbox_inches='tight')
+        plt.close(fig)
     
     return fig
 
 
-def create_animation(
+def create_animation_impl(
     states: List[np.ndarray],
     times: np.ndarray,
     dx: float,
@@ -442,3 +564,18 @@ def plot_final_summary(
                     edgecolor='none', bbox_inches='tight')
     
     return fig
+
+
+# Legacy function alias for backward compatibility
+def create_animation(
+    states: List[np.ndarray],
+    times: np.ndarray,
+    dx: float,
+    dy: float,
+    gamma: float,
+    title: str = "MHD Simulation",
+    save_path: Optional[Path] = None,
+    fps: int = 10
+) -> Optional[animation.FuncAnimation]:
+    """Legacy alias for create_animation_impl."""
+    return create_animation_impl(states, times, dx, dy, gamma, title, save_path, fps)
