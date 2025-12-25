@@ -196,55 +196,6 @@ Default normalization (solar wind conditions):
 | Alfvén velocity | v_A | ~890 m/s |
 | Alfvén time | τ_A | ~1124 s |
 
-## Testing
-
-Run the test suite:
-
-```bash
-pytest tests/ -v
-```
-
-Run specific test categories:
-
-```bash
-# Unit tests only
-pytest tests/test_metrics.py -v
-
-# Integration tests
-pytest tests/ -m integration -v
-```
-
-## Project Structure
-
-```
-baron-sakender/
-├── src/baron_sakender/
-│   ├── core/
-│   │   ├── mhd_system.py      # Physical system & initial conditions
-│   │   ├── integrator.py      # JAX-accelerated numerics
-│   │   └── metrics.py         # Diagnostic computations
-│   ├── io/
-│   │   ├── config_manager.py  # Configuration parsing
-│   │   └── data_handler.py    # NetCDF/CSV output
-│   └── visualization/
-│       └── animator.py        # Plotting & animation
-├── tests/
-│   ├── test_metrics.py
-│   └── test_integrator.py
-├── configs/                   # Example configurations
-├── README.md
-└── pyproject.toml
-```
-
-## References
-
-1. Dedner, A., et al. (2002). "Hyperbolic Divergence Cleaning for the MHD Equations." *J. Comput. Phys.* 175, 645-673.
-
-2. Orszag, S. A., & Tang, C.-M. (1979). "Small-scale structure of two-dimensional magnetohydrodynamic turbulence." *J. Fluid Mech.* 90, 129-143.
-
-3. Biskamp, D. (2003). *Magnetohydrodynamic Turbulence*. Cambridge University Press.
-
-4. Toro, E. F. (2009). *Riemann Solvers and Numerical Methods for Fluid Dynamics*. Springer.
 
 ## License
 
@@ -258,17 +209,8 @@ If you use Baron-Sakender in your research, please cite:
 @software{baron_sakender,
   title = {Baron-Sakender: JAX-Accelerated 2D Ideal MHD Solver},
   author = {Herho, Sandy H. S.},
-  year = {2024},
+  year = {2025},
   url = {https://github.com/username/baron-sakender}
 }
 ```
 
-## Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Acknowledgments
-
-- JAX team at Google for the excellent autodiff framework
-- The plasma physics community for benchmark test cases
-- Baron Sakender from Javanese literary tradition for the name inspiration
