@@ -333,7 +333,8 @@ def fit_spectral_index(
     nx: int,
     k_min_factor: float = 3.0,
     k_max_factor: float = 8.0,
-    energy_threshold: float = 1e-6
+    energy_threshold: float = 1e-12,
+    min_points: int = 3
 ) -> float:
     """
     Fit power-law spectral index in the inertial range.
@@ -353,64 +354,126 @@ def fit_spectral_index(
         E: Energy spectrum array
         nx: Grid resolution (for setting k_max)
         k_min_factor: Minimum k as multiple of fundamental wavenumber
-        k_max_factor: Maximum k as fraction of Nyquist (nx / k_max_factor)
+        k_max_factor: Divides max k to get upper bound of inertial range
         energy_threshold: Minimum relative energy for inclusion
+        min_points: Minimum number of points for fit
     
     Returns:
         Spectral index (slope of log-log fit), or NaN if fit fails
     """
-    # Fundamental wavenumber
-    k_fundamental = k[k > 0][0] if np.any(k > 0) else 1.0
-    
-    # Resolution-dependent bounds
-    # k_min: Skip the first few modes (energy injection scale)
-    k_min = k_min_factor * k_fundamental
-    
-    # k_max: Stay well below Nyquist to avoid dissipation range
-    # For first-order HLL, dissipation starts early (~nx/8 or so)
-    k_nyquist = np.pi * nx / (2 * np.pi)  # Approximate Nyquist
-    k_max = k_nyquist / k_max_factor
-    
-    # Ensure k_max > k_min
-    if k_max <= k_min:
-        k_max = 2 * k_min
-    
-    # Energy threshold (relative to peak)
-    E_max = np.max(E)
-    E_threshold = energy_threshold * E_max
-    
-    # Select inertial range
-    valid = (
-        (k > k_min) & 
-        (k < k_max) & 
-        (E > E_threshold) & 
-        (E > 0) &
-        np.isfinite(E)
-    )
-    
-    # Need at least 5 points for reliable fit
-    if np.sum(valid) < 5:
+    # Handle empty or all-zero spectra
+    if len(k) == 0 or len(E) == 0:
         return np.nan
     
+    E_max = np.max(E)
+    if E_max == 0 or not np.isfinite(E_max):
+        return np.nan
+    
+    # Find positive k values
+    positive_k_mask = k > 0
+    if not np.any(positive_k_mask):
+        return np.nan
+    
+    k_positive = k[positive_k_mask]
+    E_positive = E[positive_k_mask]
+    
+    # Fundamental wavenumber (smallest positive k)
+    k_fundamental = np.min(k_positive)
+    
+    # Set inertial range bounds
+    # k_min: Skip energy injection scales (first few modes)
+    k_min = k_min_factor * k_fundamental
+    
+    # k_max: Stay well below dissipation range
+    # For HLL with nx=256, dissipation starts around k ~ nx/8
+    k_max = np.max(k_positive) / k_max_factor
+    
+    # Ensure reasonable bounds
+    if k_max <= k_min:
+        # Try with more relaxed bounds
+        k_min = 2.0 * k_fundamental
+        k_max = np.max(k_positive) / 4.0
+    
+    if k_max <= k_min:
+        return np.nan
+    
+    # Energy threshold (relative to peak)
+    E_threshold = energy_threshold * E_max
+    
+    # Select inertial range points
+    valid = (
+        (k_positive > k_min) & 
+        (k_positive < k_max) & 
+        (E_positive > E_threshold) & 
+        (E_positive > 0) &
+        np.isfinite(E_positive) &
+        np.isfinite(k_positive)
+    )
+    
+    n_valid = np.sum(valid)
+    
+    # If not enough points, try relaxed bounds
+    if n_valid < min_points:
+        k_min_relaxed = 1.5 * k_fundamental
+        k_max_relaxed = np.max(k_positive) / 3.0
+        
+        valid = (
+            (k_positive > k_min_relaxed) & 
+            (k_positive < k_max_relaxed) & 
+            (E_positive > E_threshold) & 
+            (E_positive > 0) &
+            np.isfinite(E_positive) &
+            np.isfinite(k_positive)
+        )
+        n_valid = np.sum(valid)
+    
+    # Still not enough points? Try even more relaxed
+    if n_valid < min_points:
+        k_min_very_relaxed = k_fundamental
+        k_max_very_relaxed = np.max(k_positive) / 2.0
+        
+        valid = (
+            (k_positive > k_min_very_relaxed) & 
+            (k_positive < k_max_very_relaxed) & 
+            (E_positive > 0) &
+            np.isfinite(E_positive) &
+            np.isfinite(k_positive)
+        )
+        n_valid = np.sum(valid)
+    
+    if n_valid < min_points:
+        return np.nan
+    
+    # Extract valid points
+    k_fit = k_positive[valid]
+    E_fit = E_positive[valid]
+    
     # Log-log linear regression
-    log_k = np.log10(k[valid])
-    log_E = np.log10(E[valid])
+    log_k = np.log10(k_fit)
+    log_E = np.log10(E_fit)
     
     # Check for valid log values
     if not (np.all(np.isfinite(log_k)) and np.all(np.isfinite(log_E))):
         return np.nan
     
+    # Check for sufficient spread in k (at least factor of 2)
+    k_spread = np.max(log_k) - np.min(log_k)
+    if k_spread < 0.3:  # log10(2) ≈ 0.3
+        return np.nan
+    
     try:
+        # Linear fit: log(E) = α * log(k) + b
         coeffs = np.polyfit(log_k, log_E, 1)
         spectral_index = coeffs[0]
         
         # Sanity check: physical spectra should be between 0 and -6
-        # Steeper than -6 indicates numerical artifacts
+        # Steeper than -6 or positive indicates problems
         if spectral_index < -6 or spectral_index > 1:
             return np.nan
             
         return float(spectral_index)
-    except (np.linalg.LinAlgError, ValueError):
+        
+    except (np.linalg.LinAlgError, ValueError, FloatingPointError):
         return np.nan
 
 
@@ -431,6 +494,7 @@ def compute_structure_functions(
         Dictionary with lags and structure functions
     """
     nx, ny = field.shape
+    max_lag = min(max_lag, nx // 4, ny // 4)  # Ensure reasonable max_lag
     lags = np.arange(1, max_lag + 1)
     
     results = {'lags': lags}
@@ -538,7 +602,8 @@ def compute_turbulence_metrics(
     energy_imbalance = (zp_energy - zm_energy) / (zp_energy + zm_energy + 1e-10)
     
     # ---- Spectra ----
-    n_bins = min(30, nx // 4)  # Adjust bins based on resolution
+    # Use more bins for better spectral resolution
+    n_bins = min(64, nx // 2)
     k_centers, E_k, E_m = compute_energy_spectrum(U, dx, dy, gamma, n_bins=n_bins)
     
     # Fit spectral indices with improved algorithm
@@ -1040,16 +1105,35 @@ def compute_composite_metrics(
     
     # ---- 5. Cascade Efficiency Index ----
     # Measures how efficiently energy cascades from large to small scales
-    n_bins = min(20, nx // 4)
+    # Use more bins for better resolution
+    n_bins = min(64, nx // 2)
     k_centers, E_k, E_m = compute_energy_spectrum(U, dx, dy, gamma, n_bins=n_bins)
     
-    # Energy in large scales (k < k_max/4) vs small scales (k > k_max/4)
-    if len(k_centers) > 4:
-        k_transition = k_centers[len(k_centers)//4]
-        large_scale_energy = np.sum(E_k[k_centers < k_transition] + E_m[k_centers < k_transition])
-        small_scale_energy = np.sum(E_k[k_centers >= k_transition] + E_m[k_centers >= k_transition])
+    # Total spectrum
+    E_total = E_k + E_m
+    
+    # Find the transition scale (where spectrum starts to drop significantly)
+    # Use median k as divider between large and small scales
+    if len(k_centers) > 4 and np.sum(E_total) > 0:
+        # Use cumulative energy to find scale separation
+        cumsum_E = np.cumsum(E_total)
+        total_E = cumsum_E[-1]
         
-        cascade_efficiency = small_scale_energy / (large_scale_energy + 1e-10)
+        if total_E > 0:
+            # Find k where 50% of energy is contained (large scale cutoff)
+            half_energy_idx = np.searchsorted(cumsum_E, 0.5 * total_E)
+            half_energy_idx = max(1, min(half_energy_idx, len(k_centers) - 2))
+            
+            # Energy in large scales (below median)
+            large_scale_energy = cumsum_E[half_energy_idx]
+            # Energy in small scales (above median)  
+            small_scale_energy = total_E - large_scale_energy
+            
+            # Cascade efficiency: ratio of small to large scale energy
+            # Higher values = more energy has cascaded to small scales
+            cascade_efficiency = small_scale_energy / (large_scale_energy + 1e-10)
+        else:
+            cascade_efficiency = 0.0
     else:
         cascade_efficiency = 0.0
     
@@ -1100,21 +1184,21 @@ def compute_composite_metrics(
         numerical_dissipation_proxy = 0.0
     
     return {
-        'comp_dynamo_efficiency_index': float(dynamo_efficiency),
-        'comp_mhd_complexity_index': float(mhd_complexity_index),
-        'comp_coherent_structure_index': float(coherent_structure_index),
-        'comp_current_sheet_fraction': float(current_sheet_area),
-        'comp_vortex_fraction': float(coherent_area),
-        'comp_intermittency_index': float(intermittency_index),
-        'comp_intermittency_vorticity': float(intermittency_index_omega),
-        'comp_intermittency_current': float(intermittency_index_J),
-        'comp_cascade_efficiency': float(cascade_efficiency),
-        'comp_alignment_index': float(alignment_index),
-        'comp_perpendicularity_index': float(perpendicularity),
-        'comp_conservation_quality': float(conservation_quality) if conservation_initial else np.nan,
-        'comp_mass_conservation_error': float(mass_error) if conservation_initial else np.nan,
-        'comp_energy_conservation_error': float(energy_error) if conservation_initial else np.nan,
-        'comp_numerical_dissipation_proxy': float(numerical_dissipation_proxy),
+        'dynamo_efficiency_index': float(dynamo_efficiency),
+        'mhd_complexity_index': float(mhd_complexity_index),
+        'coherent_structure_index': float(coherent_structure_index),
+        'current_sheet_fraction': float(current_sheet_area),
+        'vortex_fraction': float(coherent_area),
+        'intermittency_index': float(intermittency_index),
+        'intermittency_vorticity': float(intermittency_index_omega),
+        'intermittency_current': float(intermittency_index_J),
+        'cascade_efficiency': float(cascade_efficiency),
+        'alignment_index': float(alignment_index),
+        'perpendicularity_index': float(perpendicularity),
+        'conservation_quality': float(conservation_quality) if conservation_initial else np.nan,
+        'mass_conservation_error': float(mass_error) if conservation_initial else np.nan,
+        'energy_conservation_error': float(energy_error) if conservation_initial else np.nan,
+        'numerical_dissipation_proxy': float(numerical_dissipation_proxy),
     }
 
 
