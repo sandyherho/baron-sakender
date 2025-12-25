@@ -1,24 +1,26 @@
-[tool.poetry]
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
 name = "baron-sakender"
 version = "0.0.1"
-description = "JAX-Accelerated 2D Ideal MHD Solver with Comprehensive Turbulence and Conservation Metrics"
-authors = [
-    "Sandy H. S. Herho <sandy.herho@email.ucr.edu>",
-    "Faiz R. Fajary",
-    "Nurjanna J. Trilaksono",
-    "Dasapta E. Irawan",
-]
-license = "MIT"
+description = "JAX-Accelerated 2D Ideal MHD Solver"
 readme = "README.md"
-homepage = "https://github.com/sandyherho/baron-sakender"
-repository = "https://github.com/sandyherho/baron-sakender"
+license = {text = "MIT"}
+authors = [
+    {name = "Sandy H. S. Herho", email = "sandy.herho@email.ucr.edu"}
+]
 keywords = [
-    "mhd", "magnetohydrodynamics", "turbulence", "jax",
-    "plasma-physics", "orszag-tang", "computational-physics",
-    "conservation-laws", "information-theory"
+    "MHD",
+    "magnetohydrodynamics",
+    "plasma physics",
+    "JAX",
+    "simulation",
+    "scientific computing"
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
@@ -29,40 +31,77 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Physics",
     "Topic :: Scientific/Engineering :: Astronomy",
-    "Topic :: Scientific/Engineering :: Mathematics",
 ]
-packages = [{include = "baron_sakender", from = "src"}]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "matplotlib>=3.5",
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "netCDF4>=1.5",
+]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-numpy = ">=1.20.0"
-scipy = ">=1.7.0"
-matplotlib = ">=3.5.0"
-pandas = ">=1.3.0"
-netCDF4 = ">=1.5.0"
-Pillow = ">=9.0.0"
-tqdm = ">=4.60.0"
-jax = ">=0.4.0"
-jaxlib = ">=0.4.0"
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "isort>=5.0",
+    "flake8>=6.0",
+    "mypy>=1.0",
+]
+docs = [
+    "sphinx>=6.0",
+    "sphinx-rtd-theme>=1.0",
+    "myst-parser>=1.0",
+]
 
-[tool.poetry.group.dev.dependencies]
-black = ">=22.0.0"
-pytest = ">=7.0.0"
-pytest-cov = ">=4.0.0"
+[project.urls]
+Homepage = "https://github.com/sandyherho/baron-sakender"
+Documentation = "https://baron-sakender.readthedocs.io"
+Repository = "https://github.com/sandyherho/baron-sakender"
+Issues = "https://github.com/sandyherho/baron-sakender/issues"
 
-[tool.poetry.scripts]
-baron-sakender = "baron_sakender.cli:main"
+[tool.setuptools.packages.find]
+where = ["src"]
 
-[tool.black]
-line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312']
-include = '\.pyi?$'
+[tool.setuptools.package-dir]
+"" = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
 addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
 
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.mypy_cache
+    | \.pytest_cache
+    | \.venv
+    | build
+    | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_gitignore = true
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
