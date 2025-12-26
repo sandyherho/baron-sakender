@@ -64,9 +64,6 @@ docs = [
     "sphinx-rtd-theme>=1.2",
     "myst-parser>=1.0",
 ]
-all = [
-    "baron-sakender[gpu,netcdf,dev,docs]",
-]
 
 [project.scripts]
 baron-sakender = "baron_sakender.cli:main"
