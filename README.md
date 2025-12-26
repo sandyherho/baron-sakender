@@ -1,6 +1,7 @@
 # `baron-sakender`: JAX-Accelerated 2D Ideal MHD Solver
 
 [![Tests](https://github.com/sandyherho/baron-sakender/actions/workflows/tests.yml/badge.svg)](https://github.com/sandyherho/baron-sakender/actions/workflows/tests.yml)
+[![PyPI version](https://img.shields.io/pypi/v/baron-sakender.svg)](https://pypi.org/project/baron-sakender/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
@@ -12,6 +13,10 @@
 ---
 
 > *Baron Sakender is a legendary figure in Javanese folklore, depicted as a European nobleman (often Spanish or Dutch) who voyages to Java to challenge local rulers. His significance lies in the Serat Baron Sakender, a semi-historical narrative interweaving European presence with Javanese cultural legitimacy. By portraying Sakender as a formidable outsider who ultimately submits to Javanese authority, these chronicles served as a sophisticated political instrument for Javanese monarchs to negotiate their sovereignty and preserve cultural primacy during the Dutch colonial era.*
+
+<p align="center">
+  <img src=".assets/case1_orszag_tang.gif" alt="Orszag-Tang Vortex Simulation" width="600">
+</p>
 
 ---
 
