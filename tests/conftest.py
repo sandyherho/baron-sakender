@@ -1,5 +1,13 @@
 """Pytest configuration and fixtures for baron-sakender tests."""
 
+import sys
+from pathlib import Path
+
+# Add src directory to Python path so tests can import baron_sakender
+# This allows running pytest without installing the package
+src_path = Path(__file__).parent.parent / "src"
+sys.path.insert(0, str(src_path))
+
 import pytest
 import numpy as np
 
