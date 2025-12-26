@@ -7,7 +7,7 @@ help:
 	@echo ""
 	@echo "Installation:"
 	@echo "  make install     - Install package with pip"
-	@echo "  make dev         - Install in development mode with poetry"
+	@echo "  make dev         - Install in development mode with dev dependencies"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test        - Run all tests"
@@ -30,13 +30,13 @@ install:
 	pip install .
 
 dev:
-	poetry install
+	pip install -e ".[dev,netcdf]"
 
 test:
 	pytest tests/ -v
 
 test-cov:
-	pytest tests/ -v --cov=src/baron_sakender --cov-report=html
+	pytest tests/ -v --cov=baron_sakender --cov-report=html
 
 run-all:
 	baron-sakender --all
@@ -76,6 +76,7 @@ clean:
 	rm -rf src/baron_sakender/visualization/__pycache__/
 	rm -rf .pytest_cache/
 	rm -rf *.egg-info/
+	rm -rf src/*.egg-info/
 	rm -rf dist/
 	rm -rf build/
 	rm -rf htmlcov/
