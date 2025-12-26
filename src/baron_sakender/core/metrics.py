@@ -6,8 +6,6 @@ Provides reliable metrics for quantifying MHD dynamics with HLL solver:
     - Stability metrics (CFL, Mach numbers, plasma beta)
     - Turbulence metrics (enstrophy, current, cross helicity)
 
-Note: Spectral indices removed as HLL solver is too diffusive for 
-accurate inertial range measurements. Use HLLD for turbulence research.
 
 References:
     Biskamp, D. (2003). Magnetohydrodynamic Turbulence.
@@ -232,7 +230,7 @@ def compute_stability_metrics(
 
 
 # ============================================================================
-# TURBULENCE METRICS (Reliable ones only)
+# TURBULENCE METRICS
 # ============================================================================
 
 def compute_turbulence_metrics(
@@ -244,10 +242,6 @@ def compute_turbulence_metrics(
 ) -> Dict[str, Any]:
     """
     Compute reliable MHD turbulence metrics.
-    
-    Note: Spectral indices removed - HLL solver is too diffusive for
-    accurate inertial range measurements. These metrics focus on
-    integral quantities that are well-resolved.
     
     Args:
         U: Conservative variables
@@ -287,15 +281,15 @@ def compute_turbulence_metrics(
     max_current = float(np.max(np.abs(Jz)))
     rms_current = float(np.sqrt(np.mean(Jz**2)))
     
-    # === Cross Helicity (MHD Invariant - Reliable) ===
+    # === Cross Helicity (MHD Invariant) ===
     cross_helicity = np.sum(vx * Bx + vy * By) * dV
     sigma_c = cross_helicity / (np.sqrt(kinetic_energy * magnetic_energy) + 1e-10)
     
-    # === Residual Energy (Reliable) ===
+    # === Residual Energy ===
     residual_energy = kinetic_energy - magnetic_energy
     sigma_r = residual_energy / (total_energy + 1e-10)
     
-    # === Elsasser Variables (Reliable) ===
+    # === Elsasser Variables ===
     # z+ = v + B/sqrt(rho), z- = v - B/sqrt(rho)
     sqrt_rho = np.sqrt(rho)
     zp_x = vx + Bx / sqrt_rho
@@ -307,7 +301,7 @@ def compute_turbulence_metrics(
     zm_energy = 0.5 * np.sum(rho * (zm_x**2 + zm_y**2)) * dV
     energy_imbalance = (zp_energy - zm_energy) / (zp_energy + zm_energy + 1e-10)
     
-    # === Intermittency (Kurtosis - Reliable) ===
+    # === Intermittency (Kurtosis) ===
     # Kurtosis > 3 indicates intermittency (non-Gaussian tails)
     omega_var = np.mean(omega_z**2)
     Jz_var = np.mean(Jz**2)
@@ -357,7 +351,7 @@ def compute_turbulence_metrics(
 
 
 # ============================================================================
-# COMPOSITE METRICS (Simplified - Reliable ones only)
+# COMPOSITE METRICS 
 # ============================================================================
 
 def compute_composite_metrics(
@@ -370,9 +364,6 @@ def compute_composite_metrics(
 ) -> Dict[str, float]:
     """
     Compute composite metrics for MHD analysis.
-    
-    Removed: cascade_efficiency (requires accurate spectral index)
-    Kept: conservation quality, alignment, dynamo efficiency
     
     Args:
         U: Conservative variables
@@ -436,7 +427,7 @@ def compute_composite_metrics(
 
 
 # ============================================================================
-# INFORMATION METRICS (Simplified)
+# INFORMATION METRICS
 # ============================================================================
 
 def compute_information_metrics(
@@ -447,9 +438,8 @@ def compute_information_metrics(
     verbose: bool = False
 ) -> Dict[str, float]:
     """
-    Compute simplified information-theoretic metrics.
+    Compute information-theoretic metrics.
     
-    Kept only the most physically meaningful ones.
     
     Args:
         U: Conservative variables
@@ -516,9 +506,6 @@ def compute_all_metrics(
 ) -> Dict[str, Any]:
     """
     Compute all reliable MHD metrics for a given state.
-    
-    This version removes unreliable metrics (spectral indices, cascade
-    efficiency) that are compromised by HLL numerical diffusion.
     
     Args:
         U: Conservative variables [7, nx, ny]

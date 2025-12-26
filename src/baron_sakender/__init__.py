@@ -23,12 +23,12 @@ Features:
     - Multiple output formats (CSV, NetCDF, PNG, GIF)
 
 
-Authors: Sandy H. S. Herho, Faiz R. Fajary, Nurjanna J. Trilaksono, Dasapta E. Irawan
+Authors: Sandy H. S. Herho, Nurjanna J. Trilaksono
 License: MIT
 """
 
 __version__ = "0.0.1"
-__author__ = "Sandy H. S. Herho, Nurjanna J. Trilaksono, Faiz R. Fajary, Rusmawan Suwarman, Dasapta E. Irawan"
+__author__ = "Sandy H. S. Herho, Nurjanna J. Trilaksono"
 __email__ = "sandy.herho@email.ucr.edu"
 __license__ = "MIT"
 

@@ -255,14 +255,14 @@ class DataHandler:
             nc.backend = result.get('backend', 'cpu')
             
             # CF Metadata
-            nc.title = "2D Ideal MHD Simulation - Baron-Sakender"
+            nc.title = "2D Ideal MHD Simulation - baron-sakender"
             nc.institution = "baron-sakender v0.0.1"
             nc.source = "JAX-accelerated finite volume solver"
             nc.history = f"Created {datetime.now().isoformat()}"
             nc.Conventions = "CF-1.8"
             
             # Author info
-            nc.author = "Sandy H. S. Herho, Nurjanna J. Trilaksono, Faiz R. Fajary, Rusmawan Suwarman, Dasapta E. Irawan"
+            nc.author = "Sandy H. S. Herho, Nurjanna J. Trilaksono"
             nc.contact = "sandy.herho@email.ucr.edu"
             nc.license = "MIT"
     
