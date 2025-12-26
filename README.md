@@ -1,5 +1,6 @@
 # `baron-sakender`: JAX-Accelerated 2D Ideal MHD Solver
 
+[![DOI](https://zenodo.org/badge/1118564602.svg)](https://doi.org/10.5281/zenodo.18059201)
 [![Tests](https://github.com/sandyherho/baron-sakender/actions/workflows/tests.yml/badge.svg)](https://github.com/sandyherho/baron-sakender/actions/workflows/tests.yml)
 [![PyPI version](https://img.shields.io/pypi/v/baron-sakender.svg)](https://pypi.org/project/baron-sakender/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
