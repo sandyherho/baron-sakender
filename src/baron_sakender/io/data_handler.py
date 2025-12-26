@@ -260,10 +260,9 @@ class DataHandler:
             nc.source = "JAX-accelerated finite volume solver"
             nc.history = f"Created {datetime.now().isoformat()}"
             nc.Conventions = "CF-1.8"
-            nc.references = "Orszag & Tang (1979); Stone et al. (2008)"
             
             # Author info
-            nc.author = "Sandy H. S. Herho, Faiz R. Fajary, Nurjanna J. Trilaksono, Dasapta E. Irawan"
+            nc.author = "Sandy H. S. Herho, Nurjanna J. Trilaksono, Faiz R. Fajary, Rusmawan Suwarman, Dasapta E. Irawan"
             nc.contact = "sandy.herho@email.ucr.edu"
             nc.license = "MIT"
     

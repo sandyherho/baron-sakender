@@ -7,6 +7,10 @@ Usage:
     baron-sakender case2              # Run strong magnetic field
     baron-sakender case3              # Run current sheet
     baron-sakender case4              # Run Alfven wave
+    baron-sakender -a                 # Run all cases sequentially
+    baron-sakender --all              # Run all cases sequentially
+    baron-sakender -c config.txt      # Run from config file
+    baron-sakender --config my.txt    # Run from config file
     baron-sakender --help             # Show help
 """
 
@@ -52,6 +56,7 @@ SCENARIOS = {
         'save_dt': 0.05,
         'cfl': 0.4,
         'gamma': 5/3,
+        'amplitude': 1.0,
     },
     'case2': {
         'name': 'Case 2 - Strong Magnetic Field',
@@ -64,6 +69,7 @@ SCENARIOS = {
         'save_dt': 0.04,
         'cfl': 0.35,
         'gamma': 5/3,
+        'beta': 0.1,
     },
     'case3': {
         'name': 'Case 3 - Current Sheet',
@@ -76,6 +82,7 @@ SCENARIOS = {
         'save_dt': 0.05,
         'cfl': 0.4,
         'gamma': 5/3,
+        'width': 0.2,
     },
     'case4': {
         'name': 'Case 4 - Alfven Wave',
@@ -88,6 +95,8 @@ SCENARIOS = {
         'save_dt': 0.1,
         'cfl': 0.4,
         'gamma': 5/3,
+        'amplitude': 0.1,
+        'wavenumber': 2,
     },
 }
 
@@ -266,13 +275,18 @@ def run_simulation(
     
     # Initialize based on type
     if config['init_type'] == 'orszag_tang':
-        system.init_orszag_tang()
+        amplitude = config.get('amplitude', 1.0)
+        system.init_orszag_tang(amplitude=amplitude)
     elif config['init_type'] == 'strong_magnetic':
-        system.init_strong_magnetic(beta=0.1)
+        beta = config.get('beta', 0.1)
+        system.init_strong_magnetic(beta=beta)
     elif config['init_type'] == 'current_sheet':
-        system.init_current_sheet(width=0.2)
+        width = config.get('width', 0.2)
+        system.init_current_sheet(width=width)
     elif config['init_type'] == 'alfven_wave':
-        system.init_alfven_wave(amplitude=0.1, k=2)
+        amplitude = config.get('amplitude', 0.1)
+        k = config.get('wavenumber', config.get('k', 2))
+        system.init_alfven_wave(amplitude=amplitude, k=k)
     else:
         raise ValueError(f"Unknown init_type: {config['init_type']}")
     
@@ -502,6 +516,86 @@ def run_simulation(
 # CLI Entry Point
 # =============================================================================
 
+def load_config_file(config_path: str) -> Dict[str, Any]:
+    """
+    Load configuration from a text file.
+    
+    Args:
+        config_path: Path to config file
+    
+    Returns:
+        Configuration dictionary compatible with run_simulation
+    """
+    from baron_sakender.io.config_manager import ConfigManager
+    
+    config = ConfigManager.load(config_path)
+    
+    # Map config file keys to SCENARIOS format
+    result = {
+        'name': config.get('scenario_name', 'Custom Simulation'),
+        'init_type': config.get('init_type', 'orszag_tang'),
+        'nx': config.get('nx', 256),
+        'ny': config.get('ny', 256),
+        'Lx': config.get('Lx', 2 * np.pi),
+        'Ly': config.get('Ly', 2 * np.pi),
+        't_end': config.get('t_end', 3.0),
+        'save_dt': config.get('save_dt', 0.05),
+        'cfl': config.get('cfl', 0.4),
+        'gamma': config.get('gamma', 5/3),
+    }
+    
+    # Optional init parameters
+    if 'beta' in config:
+        result['beta'] = config['beta']
+    if 'width' in config:
+        result['width'] = config['width']
+    if 'amplitude' in config:
+        result['amplitude'] = config['amplitude']
+    if 'wavenumber' in config:
+        result['wavenumber'] = config['wavenumber']
+    
+    return result
+
+
+def run_simulation_from_config(
+    config: Dict[str, Any],
+    output_dir: str = 'outputs',
+    verbose: bool = False,
+    use_gpu: bool = False
+) -> Dict[str, Any]:
+    """
+    Run simulation from a configuration dictionary.
+    
+    Args:
+        config: Configuration dictionary
+        output_dir: Output directory
+        verbose: Enable verbose output
+        use_gpu: Use GPU acceleration
+    
+    Returns:
+        Simulation results
+    """
+    # Create a temporary scenario key
+    init_type = config.get('init_type', 'custom')
+    scenario_name = f"custom_{init_type}"
+    
+    # Register the config temporarily
+    SCENARIOS[scenario_name] = config
+    
+    try:
+        result = run_simulation(
+            scenario_name,
+            output_dir=output_dir,
+            verbose=verbose,
+            use_gpu=use_gpu
+        )
+        return result
+    finally:
+        # Clean up temporary scenario
+        if scenario_name in SCENARIOS:
+            del SCENARIOS[scenario_name]
+
+
 def main():
     """Main entry point for CLI."""
     parser = argparse.ArgumentParser(
@@ -509,12 +603,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  baron-sakender case1          Run Orszag-Tang vortex benchmark
-  baron-sakender case2          Run strong magnetic field case
-  baron-sakender case3          Run current sheet case
-  baron-sakender case4          Run Alfven wave propagation
-  baron-sakender case1 -v       Run with verbose output
-  baron-sakender case1 --gpu    Run with GPU acceleration
+  baron-sakender case1              Run Orszag-Tang vortex benchmark
+  baron-sakender case2              Run strong magnetic field case
+  baron-sakender case3              Run current sheet case
+  baron-sakender case4              Run Alfven wave propagation
+  baron-sakender -a                 Run all test cases sequentially
+  baron-sakender --all              Run all test cases sequentially
+  baron-sakender -c config.txt      Run from config file
+  baron-sakender case1 -v           Run with verbose output
+  baron-sakender case1 --gpu        Run with GPU acceleration
 
 Available scenarios:
   case1  Orszag-Tang Vortex (standard MHD benchmark)
@@ -526,8 +623,23 @@ Available scenarios:
     
     parser.add_argument(
         'scenario',
+        nargs='?',
         choices=list(SCENARIOS.keys()),
-        help='Scenario to run'
+        default=None,
+        help='Scenario to run (optional if using -a or -c)'
+    )
+    
+    parser.add_argument(
+        '-a', '--all',
+        action='store_true',
+        help='Run all test cases sequentially'
+    )
+    
+    parser.add_argument(
+        '-c', '--config',
+        type=str,
+        default=None,
+        help='Path to configuration file (.txt)'
     )
     
     parser.add_argument(
@@ -550,14 +662,74 @@ Available scenarios:
     
     args = parser.parse_args()
     
+    # Validate arguments
+    if not args.all and not args.config and not args.scenario:
+        parser.error("Please specify a scenario, use -a/--all, or provide -c/--config")
+    
     try:
-        result = run_simulation(
-            args.scenario,
-            output_dir=args.output,
-            verbose=args.verbose,
-            use_gpu=args.gpu
-        )
-        return 0
+        # Run all cases
+        if args.all:
+            print(f"\n{'='*60}")
+            print(f"  BARON-SAKENDER: Running All Test Cases")
+            print(f"{'='*60}\n")
+            
+            results = {}
+            failed = []
+            
+            for i, scenario in enumerate(SCENARIOS.keys(), 1):
+                print(f"\n[{i}/{len(SCENARIOS)}] Running {scenario}...")
+                try:
+                    result = run_simulation(
+                        scenario,
+                        output_dir=args.output,
+                        verbose=args.verbose,
+                        use_gpu=args.gpu
+                    )
+                    results[scenario] = result
+                except Exception as e:
+                    print(f"  ERROR: {e}")
+                    failed.append((scenario, str(e)))
+            
+            # Summary
+            print(f"\n{'='*60}")
+            print(f"  ALL SIMULATIONS COMPLETE")
+            print(f"{'='*60}")
+            print(f"  Successful: {len(results)}/{len(SCENARIOS)}")
+            if failed:
+                print(f"  Failed: {len(failed)}")
+                for scenario, error in failed:
+                    print(f"    • {scenario}: {error}")
+            print(f"{'='*60}\n")
+            
+            return 0 if not failed else 1
+        
+        # Run from config file
+        elif args.config:
+            if not os.path.exists(args.config):
+                print(f"Error: Config file not found: {args.config}", file=sys.stderr)
+                return 1
+            
+            print(f"\n  Loading config: {args.config}")
+            config = load_config_file(args.config)
+            
+            result = run_simulation_from_config(
+                config,
+                output_dir=args.output,
+                verbose=args.verbose,
+                use_gpu=args.gpu
+            )
+            return 0
+        
+        # Run single scenario
+        else:
+            result = run_simulation(
+                args.scenario,
+                output_dir=args.output,
+                verbose=args.verbose,
+                use_gpu=args.gpu
+            )
+            return 0
+            
     except KeyboardInterrupt:
         print("\n\nSimulation interrupted by user.")
         return 1
